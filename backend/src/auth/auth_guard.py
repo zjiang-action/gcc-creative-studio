@@ -91,9 +91,10 @@ async def get_current_user(
 
         # If ALLOWED_ORGS is configured, check the user's organization.
         if config_service.ALLOWED_ORGS:
+            email_domain = email.split("@")[-1] if email else None
             if (
-                not token_info_hd
-                or token_info_hd not in config_service.ALLOWED_ORGS
+                not email_domain
+                or email_domain not in config_service.ALLOWED_ORGS
             ):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
