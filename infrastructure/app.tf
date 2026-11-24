@@ -52,6 +52,8 @@ module "compute" {
     BACKEND_URL              = local.backend_url
     WORKFLOWS_EXECUTOR_URL   = "${local.backend_url}/api/workflows-executor"
     SIGNING_SA_EMAIL         = google_service_account.bucket_reader_sa.email
+    # Action: keep sign-in restricted to the action.nl organisation (as in V1)
+    IDENTITY_PLATFORM_ALLOWED_ORGS = "action.nl"
   }
 
   runtime_secrets = {

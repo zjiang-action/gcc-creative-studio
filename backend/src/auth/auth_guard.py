@@ -200,7 +200,12 @@ async def get_current_user(
                 is_allowed = True
 
         if not is_allowed and config_service.ALLOWED_ORGS:
-            if token_info_hd and token_info_hd in config_service.ALLOWED_ORGS:
+            # Action: tokens do not always carry `hd`, so also accept the
+            # (Google-verified) email domain.
+            email_domain = email.split("@")[-1].lower() if email else None
+            if (token_info_hd and token_info_hd in config_service.ALLOWED_ORGS) or (
+                email_domain and email_domain in config_service.ALLOWED_ORGS
+            ):
                 is_allowed = True
 
         # If at least one restriction is configured and user is not allowed, reject.
