@@ -15,8 +15,9 @@
 
 
 from enum import Enum
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 
@@ -25,6 +26,10 @@ class MimeTypeEnum(str, Enum):
 
     IMAGE_JPEG = "image/jpeg"
     IMAGE_PNG = "image/png"
+    IMAGE_WEBP = "image/webp"
+    IMAGE_HEIC = "image/heic"
+    IMAGE_HEIF = "image/heif"
+    IMAGE_AVIF = "image/avif"
     VIDEO_MP4 = "video/mp4"
     AUDIO_WAV = "audio/wav"
     AUDIO_MPEG = "audio/mpeg"
@@ -41,11 +46,76 @@ class WildcardMimeTypeEnum(str, Enum):
     AUDIO_WILDCARD = "audio/*"
 
 
+RETIRED_TEXT_MODEL_REPLACEMENTS: dict[str, str] = {
+    "gemini-2.5-pro": "gemini-4-argon",
+    "gemini-2.5-flash": "gemini-4-hydrogen",
+}
+
+
+def normalize_retired_text_model(model: str | Enum) -> str:
+    """Maps retired Gemini 2.5 text model IDs to active Gemini 4 equivalents."""
+    raw_value = model.value if isinstance(model, Enum) else str(model)
+    return RETIRED_TEXT_MODEL_REPLACEMENTS.get(raw_value, raw_value)
+
+
 class GenerationModelEnum(str, Enum):
     """Enum representing the available generation models."""
 
     # Image-Specific Models
-    IMAGEN_4_UPSCALE_PREVIEW = "imagen-4.0-upscale-preview"
+    GEMINI_3_5_FLASH = "gemini-3.5-flash"
+    GEMINI_1_5_FLASH = "gemini-1.5-flash"
+    GEMINI_2_5_FLASH_IMAGE_PREVIEW = "gemini-2.5-flash-image-preview"
+    GEMINI_2_5_FLASH_IMAGE = "gemini-2.5-flash-image"
+    GEMINI_3_PRO_IMAGE = "gemini-3-pro-image"
+    GEMINI_3_1_FLASH_IMAGE = "gemini-3.1-flash-image"
+    GEMINI_3_1_FLASH_LITE_IMAGE = "gemini-3.1-flash-lite-image"
+    GEMINI_3_FLASH_PREVIEW = "gemini-3-flash-preview"
+    VTO = "virtual-try-on-001"
+
+    # Text / LLM Models
+    GEMINI_3_8_FLASH = "gemini-3.8-flash"
+    GEMINI_3_7_FLASH = "gemini-3.7-flash"
+    GEMINI_3_6_FLASH = "gemini-3.6-flash"
+    GEMINI_3_5_FLASH_LITE = "gemini-3.5-flash-lite"
+    GEMINI_3_1_PRO_PREVIEW = "gemini-3.1-pro-preview"
+    GEMINI_3_1_FLASH_LITE = "gemini-3.1-flash-lite"
+    GEMINI_4_ARGON = "gemini-4-argon"
+    GEMINI_4_HYDROGEN = "gemini-4-hydrogen"
+
+    # Video-Specific Models
+    GEMINI_OMNI = "gemini-omni-generate-preview"
+    GEMINI_OMNI_FLASH_PREVIEW = "gemini-omni-flash-preview"
+    GEMINI_OMNI_1_1_FLASH_PREVIEW = "gemini-omni-1.1-flash-preview"
+    GEMINI_OMNI_1_2_FLASH = "gemini-omni-1.2-flash"
+    VEO_3_1_FAST_GENERATE_001 = "veo-3.1-fast-generate-001"
+    VEO_3_1_LITE_GENERATE_001 = "veo-3.1-lite-generate-001"
+    VEO_3_1_LITE_PREVIEW = "veo-3.1-lite-generate-preview"
+    VEO_3_1_GENERATE_001 = "veo-3.1-generate-001"
+    VEO_3_1_PREVIEW = "veo-3.1-generate-preview"
+    VEO_3_FAST = "veo-3.0-fast-generate-001"
+    VEO_3_QUALITY = "veo-3.0-generate-001"
+    VEO_3_FAST_PREVIEW = "veo-3.0-fast-generate-preview"
+    VEO_3_QUALITY_PREVIEW = "veo-3.0-generate-preview"
+    # Audio-Specific Models
+    LYRIA_002 = "lyria-002"
+    LYRIA_3_CLIP_PREVIEW = "lyria-3-clip-preview"
+    LYRIA_3_PRO_PREVIEW = "lyria-3-pro-preview"
+    CHIRP_3 = "chirp_3"
+    GEMINI_2_5_FLASH_TTS = "gemini-2.5-flash-tts"
+    GEMINI_2_5_FLASH_LITE_PREVIEW_TTS = "gemini-2.5-flash-lite-preview-tts"
+    GEMINI_2_5_PRO_TTS = "gemini-2.5-pro-tts"
+    GEMINI_3_1_FLASH_TTS_PREVIEW = "gemini-3.1-flash-tts-preview"
+    # Workbench Models
+    WORKBENCH_RENDER = "workbench-render"
+
+    # Deprecated models (For old generations only, do not use)
+    GEMINI_2_5_PRO = "gemini-2.5-pro"
+    GEMINI_2_5_FLASH = "gemini-2.5-flash"
+    _DEPRECATED_VTO = "virtual-try-on-preview-08-04"
+    GEMINI_3_PRO_PREVIEW = "gemini-3-pro-preview"
+    GEMINI_3_1_FLASH_LITE_PREVIEW = "gemini-3.1-flash-lite-preview"
+    GEMINI_3_PRO_IMAGE_PREVIEW = "gemini-3-pro-image-preview"
+    GEMINI_3_1_FLASH_IMAGE_PREVIEW = "gemini-3.1-flash-image-preview"
     IMAGEN_4_001 = "imagen-4.0-generate-001"
     IMAGEN_4_ULTRA = "imagen-4.0-ultra-generate-001"
     IMAGEN_4_ULTRA_PREVIEW = "imagen-4.0-ultra-generate-preview-06-06"
@@ -57,38 +127,9 @@ class GenerationModelEnum(str, Enum):
     IMAGEGEN_006 = "imagegeneration@006"
     IMAGEGEN_005 = "imagegeneration@005"
     IMAGEGEN_002 = "imagegeneration@002"
-    GEMINI_2_5_PRO = "gemini-2.5-pro"
-    GEMINI_2_5_FLASH = "gemini-2.5-flash"
-    GEMINI_2_5_FLASH_IMAGE_PREVIEW = "gemini-2.5-flash-image-preview"
-    GEMINI_2_5_FLASH_IMAGE = "gemini-2.5-flash-image"
-    GEMINI_3_PRO_PREVIEW = "gemini-3-pro-preview"
-    GEMINI_3_PRO_IMAGE_PREVIEW = "gemini-3-pro-image-preview"
-    GEMINI_3_1_FLASH_IMAGE_PREVIEW = "gemini-3.1-flash-image-preview"
-    GEMINI_3_FLASH_PREVIEW = "gemini-3-flash-preview"
-    VTO = "virtual-try-on-001"
-
-    # Video-Specific Models
-    VEO_3_1_FAST_GENERATE_001 = "veo-3.1-fast-generate-001"
-    VEO_3_1_LITE_GENERATE_001 = "veo-3.1-lite-generate-001"
-    VEO_3_1_GENERATE_001 = "veo-3.1-generate-001"
-    VEO_3_1_PREVIEW = "veo-3.1-generate-preview"
-    VEO_3_FAST = "veo-3.0-fast-generate-001"
-    VEO_3_QUALITY = "veo-3.0-generate-001"
-    VEO_3_FAST_PREVIEW = "veo-3.0-fast-generate-preview"
-    VEO_3_QUALITY_PREVIEW = "veo-3.0-generate-preview"
     VEO_2_FAST = "veo-2.0-generate-001"
     VEO_2_QUALITY = "veo-2.0-fast-generate-001"
     VEO_2_GENERATE_EXP = "veo-2.0-generate-exp"
-
-    # Audio-Specific Models
-    LYRIA_002 = "lyria-002"
-    CHIRP_3 = "chirp_3"
-    GEMINI_2_5_FLASH_TTS = "gemini-2.5-flash-tts"
-    GEMINI_2_5_FLASH_LITE_PREVIEW_TTS = "gemini-2.5-flash-lite-preview-tts"
-    GEMINI_2_5_PRO_TTS = "gemini-2.5-pro-tts"
-
-    # Deprecated models (For old generations only, do not use)
-    _DEPRECATED_VTO = "virtual-try-on-preview-08-04"
 
     @property
     def is_gemini_image_model(self) -> bool:
@@ -97,13 +138,110 @@ class GenerationModelEnum(str, Enum):
             GenerationModelEnum.GEMINI_2_5_FLASH_IMAGE_PREVIEW,
             GenerationModelEnum.GEMINI_2_5_FLASH_IMAGE,
             GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW,
+            GenerationModelEnum.GEMINI_3_PRO_IMAGE,
             GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
+            GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+            GenerationModelEnum.GEMINI_3_1_FLASH_LITE_IMAGE,
         ]
+
+    @property
+    def is_gemini_omni_model(self) -> bool:
+        """Returns True if the model is a Gemini Omni video model.
+
+        Omni models share Omni-only behaviour derived from this property:
+        1K-only resolution and a 3s minimum clip duration.
+
+        When adding a new Omni version, add it here AND to the explicit
+        capability lists that are not derived from this property:
+        max_reference_images, supports_omni_video_refs_and_extend (which
+        drives max_reference_videos), supports_video_extension and
+        max_video_duration.
+        """
+        return self in (
+            GenerationModelEnum.GEMINI_OMNI,
+            GenerationModelEnum.GEMINI_OMNI_FLASH_PREVIEW,
+            GenerationModelEnum.GEMINI_OMNI_1_1_FLASH_PREVIEW,
+            GenerationModelEnum.GEMINI_OMNI_1_2_FLASH,
+        )
+
+    @property
+    def supports_omni_video_refs_and_extend(self) -> bool:
+        """Returns True if the Omni model supports up to 3 video references and Extend Video."""
+        return self in (
+            GenerationModelEnum.GEMINI_OMNI_1_1_FLASH_PREVIEW,
+            GenerationModelEnum.GEMINI_OMNI_1_2_FLASH,
+        )
+
+    @property
+    def max_reference_images(self) -> int:
+        """Returns the maximum number of reference images supported for video generation."""
+        if self == GenerationModelEnum.GEMINI_OMNI_1_2_FLASH:
+            return 10
+        if self == GenerationModelEnum.GEMINI_OMNI_1_1_FLASH_PREVIEW:
+            return 5
+        if self in (
+            GenerationModelEnum.VEO_3_1_PREVIEW,
+            GenerationModelEnum.VEO_3_1_GENERATE_001,
+            GenerationModelEnum.VEO_3_1_LITE_GENERATE_001,
+            GenerationModelEnum.VEO_3_1_LITE_PREVIEW,
+            GenerationModelEnum.VEO_3_1_FAST_GENERATE_001,
+            GenerationModelEnum.GEMINI_OMNI,
+            GenerationModelEnum.GEMINI_OMNI_FLASH_PREVIEW,
+        ):
+            return 3
+        return 0
+
+    @property
+    def max_reference_videos(self) -> int:
+        """Returns the maximum number of reference videos supported for video generation."""
+        return 3 if self.supports_omni_video_refs_and_extend else 0
+
+    @property
+    def supports_video_extension(self) -> bool:
+        """Returns True if this model supports extending an existing source video.
+
+        Explicit allowlist: only Gemini Omni 1.1/1.2 Flash and the Veo 3.1
+        family support extension. Every other model (older Veo versions,
+        retired Omni 1.0, image and audio models) returns False.
+        """
+        return self in (
+            GenerationModelEnum.GEMINI_OMNI_1_2_FLASH,
+            GenerationModelEnum.GEMINI_OMNI_1_1_FLASH_PREVIEW,
+            GenerationModelEnum.VEO_3_1_GENERATE_001,
+            GenerationModelEnum.VEO_3_1_PREVIEW,
+            GenerationModelEnum.VEO_3_1_LITE_GENERATE_001,
+            GenerationModelEnum.VEO_3_1_LITE_PREVIEW,
+            GenerationModelEnum.VEO_3_1_FAST_GENERATE_001,
+        )
+
+    def max_video_duration(
+        self,
+        *,
+        has_any_references: bool = False,
+        has_source_video: bool = False,
+        has_end_frame: bool = False,
+    ) -> int:
+        """Returns the maximum supported clip duration in seconds for this model and input mode."""
+        if self == GenerationModelEnum.GEMINI_OMNI_1_2_FLASH:
+            if has_any_references or has_source_video or has_end_frame:
+                return 10
+            return 15
+        if self in (
+            GenerationModelEnum.GEMINI_OMNI,
+            GenerationModelEnum.GEMINI_OMNI_FLASH_PREVIEW,
+            GenerationModelEnum.GEMINI_OMNI_1_1_FLASH_PREVIEW,
+        ):
+            return 10
+        return 8
 
     @property
     def valid_aspect_ratios(self) -> list["AspectRatioEnum"]:
         """Returns the valid aspect ratios for the model."""
-        if self in [GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW]:
+        if self in [
+            GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
+            GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+            GenerationModelEnum.GEMINI_3_1_FLASH_LITE_IMAGE,
+        ]:
             return [
                 AspectRatioEnum.RATIO_1_1,
                 AspectRatioEnum.RATIO_3_4,
@@ -146,7 +284,10 @@ class GenerationModelEnum(str, Enum):
         """Returns the maximum number of total inputs allowed for the model."""
         if self in [
             GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW,
+            GenerationModelEnum.GEMINI_3_PRO_IMAGE,
             GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
+            GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+            GenerationModelEnum.GEMINI_3_1_FLASH_LITE_IMAGE,
         ]:
             return 14
         if self.is_gemini_image_model:
@@ -174,6 +315,7 @@ class AspectRatioEnum(str, Enum):
     RATIO_4_1 = "4:1"
     RATIO_1_8 = "1:8"
     RATIO_8_1 = "8:1"
+    AUTO = "auto"
     OTHER = "other"
 
 
@@ -247,4 +389,16 @@ class BaseDto(BaseModel):
         extra="forbid",
         populate_by_name=True,
         from_attributes=True,
+    )
+
+
+class AssetReferenceDto(BaseDto):
+    id: int = Field(description="The ID of the asset.")
+    type: Literal["source_asset", "media_item"] = Field(
+        description="The type of asset: 'source_asset' or 'media_item'."
+    )
+    index: int | None = Field(
+        default=0,
+        ge=0,
+        description="The index of the media in the media item (if applicable).",
     )

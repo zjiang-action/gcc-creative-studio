@@ -81,6 +81,13 @@ class AssetRoleEnum(str, Enum):
     IMAGE_REFERENCE_ASSET = (
         "image_reference_asset"  # An input for R2V with asset type
     )
+    VIDEO_REFERENCE = "video_reference"  # Video used as omni input reference
+    # Legacy: kept to read historical records; rejected for new video
+    # generation requests.
+    AUDIO_REFERENCE = "audio_reference"
+    YOUTUBE_VIDEO_REFERENCE = (
+        "youtube_video_reference"  # YouTube video used as input reference
+    )
 
 
 class SourceAssetLink(BaseModel):
@@ -117,7 +124,7 @@ class SourceMediaItemLink(BaseModel):
     media_item_id: int
     """The ID of the source MediaItemModel in the 'media_library' collection."""
 
-    media_index: int
+    media_index: int = Field(ge=0)
     """The index of the specific image within the parent's `gcs_uris` list."""
 
     role: AssetRoleEnum
@@ -141,15 +148,27 @@ class MediaItem(Base):
         ForeignKey("workspaces.id"),
         nullable=False,
     )
+    folder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("folders.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     user_email: Mapped[str] = mapped_column(String, nullable=False)
     user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"),
         nullable=True,
     )
     mime_type: Mapped[MimeTypeEnum] = mapped_column(String, nullable=False)
-    model: Mapped[GenerationModelEnum] = mapped_column(String, nullable=False)
+    model: Mapped[GenerationModelEnum | str] = mapped_column(
+        String, nullable=False
+    )
 
     # Common fields
+    titles: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), default=[], nullable=True
+    )
+    descriptions: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), default=[], nullable=True
+    )
     prompt: Mapped[str | None] = mapped_column(String, nullable=True)
     original_prompt: Mapped[str | None] = mapped_column(String, nullable=True)
     rewritten_prompt: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -246,12 +265,18 @@ class MediaItemModel(BaseDocument):
     workspace_id: int = Field(
         description="Foreign key (ID) to the 'workspaces' collection this creation belongs to.",
     )
+    folder_id: int | None = Field(
+        default=None,
+        description="Foreign key (ID) to the 'folders' collection this creation belongs to.",
+    )
     user_email: str
     user_id: int | None = None  # TODO: Change to 'required' in the future
     mime_type: MimeTypeEnum
-    model: GenerationModelEnum
+    model: GenerationModelEnum | str
 
     # Common fields across media types
+    titles: list[str] | None = Field(default_factory=list)
+    descriptions: list[str] | None = Field(default_factory=list)
     prompt: str | None = None
     original_prompt: str | None = None
     rewritten_prompt: str | None = None

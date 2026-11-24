@@ -16,7 +16,7 @@ from typing import Any
 
 import google.auth
 from google.auth.exceptions import DefaultCredentialsError
-from pydantic import Field, computed_field, model_validator
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,6 +44,7 @@ class ConfigService(BaseSettings):
     ENVIRONMENT: str = "development"
     FRONTEND_URL: str = "http://localhost:4200"
     BACKEND_URL: str = "http://localhost:8080"
+    IZUMI_AGENT_URL: str = "http://izumi-agent:8080"
     LOG_LEVEL: str = "INFO"
     INIT_VERTEX: bool = True
 
@@ -52,14 +53,15 @@ class ConfigService(BaseSettings):
     ALLOWED_ORGS_STR: str = Field(
         default="", alias="IDENTITY_PLATFORM_ALLOWED_ORGS"
     )
+    ALLOWED_EMAILS_STR: str = Field(default="", alias="ALLOWED_EMAILS")
 
     # --- Storage ---
     # The defaults will be set in the validator below to prevent recursion.
     GENMEDIA_BUCKET: str = ""
 
     # --- Gemini ---
-    GEMINI_MODEL_ID: str = "gemini-2.5-pro"
-    GEMINI_AUDIO_ANALYSIS_MODEL_ID: str = "gemini-2.5-pro"
+    GEMINI_MODEL_ID: str = "gemini-4-argon"
+    GEMINI_AUDIO_ANALYSIS_MODEL_ID: str = "gemini-4-argon"
 
     # --- Database Configuration ---
     INSTANCE_CONNECTION_NAME: str = ""
@@ -71,7 +73,7 @@ class ConfigService(BaseSettings):
     DB_PORT: str = "5432"
 
     # --- Veo ---
-    VEO_MODEL_ID: str = "veo-2.0-generate-001"
+    VEO_MODEL_ID: str = "veo-3.1-generate-001"
 
     # --- VTO ---
     VTO_MODEL_ID: str = "virtual-try-on-001"
@@ -94,12 +96,51 @@ class ConfigService(BaseSettings):
     )
     ADMIN_USER_EMAIL: str = "system"
 
+    # --- Agent Auth ---
+    AGENT_ENGINE_RESOURCE_NAME: str = ""
+    AGENT_LOCATION: str = "us-central1"
+    AGENT_ENGINE_USER_AUTH_TOKEN_KEY: str = "user_auth_token"
+    # Talk to a local Izumi (ADK api_server) container at IZUMI_AGENT_URL
+    # instead of Vertex AI Agent Engine. Leave unset to derive it from
+    # ENVIRONMENT ("local" => local container); set explicitly to force it.
+    USE_LOCAL_IZUMI_AGENT: bool | None = None
+
+    @property
+    def IS_LOCAL_IZUMI_AGENT(self) -> bool:
+        """True when the agent chat should target the local Izumi container."""
+        if self.USE_LOCAL_IZUMI_AGENT is not None:
+            return self.USE_LOCAL_IZUMI_AGENT
+        return self.ENVIRONMENT.strip().lower() == "local"
+
     # --- Workflows ---
     WORKFLOWS_LOCATION: str = "us-central1"
     WORKFLOWS_EXECUTOR_URL: str = (
         "http://localhost:8080"  # This service could be deployed alone in the future
     )
     BACKEND_SERVICE_ACCOUNT_EMAIL: str = ""
+
+    # --- Workflow queue, retries and checkpoints ---
+    # Global cap of concurrently RUNNING runs (no per-user cap).
+    MAX_RUNNING_WORKFLOWS: int = Field(default=8, ge=1)
+    # Failure-driven L3 re-queues per step (continuations excluded).
+    WORKFLOW_MAX_STEP_ATTEMPTS: int = Field(default=5, ge=1)
+    # Wall time of one step across in-progress continuations.
+    WORKFLOW_MAX_STEP_DURATION_SECONDS: int = Field(default=1800, ge=1)
+    # Failure-driven GCP executions per run.
+    WORKFLOW_MAX_RUN_EXECUTIONS: int = Field(default=10, ge=1)
+    # Run age cap, excluding the time spent waiting for a session.
+    WORKFLOW_MAX_RUN_AGE_HOURS: int = Field(default=24, ge=1)
+    WORKFLOW_MAX_SESSION_WAIT_DAYS: int = Field(default=7, ge=1)
+    # L3 backoff (exponential with jitter, capped).
+    WORKFLOW_RETRY_BASE_SECONDS: int = Field(default=30, ge=1)
+    WORKFLOW_RETRY_MAX_SECONDS: int = Field(default=900, ge=1)
+    # YAML http.post timeout; equals the Cloud Run request limit.
+    WORKFLOW_STEP_HTTP_TIMEOUT_SECONDS: int = Field(default=300, ge=1)
+    # Executor poll budget per request; STEP_IN_PROGRESS once exceeded.
+    WORKFLOW_GEN_POLL_TIMEOUT_SECONDS: int = Field(default=270, ge=1)
+    WORKFLOW_DISPATCH_TICK_MIN_INTERVAL_SECONDS: int = Field(default=10, ge=0)
+    # Fernet key (or comma-separated MultiFernet keys) for short-lived token storage.
+    WORKFLOW_TOKEN_ENCRYPTION_KEY: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -113,6 +154,14 @@ class ConfigService(BaseSettings):
             except DefaultCredentialsError:
                 pass  # Fail gracefully, let required fields catch this if needed.
         return values
+
+    @field_validator("ENVIRONMENT", mode="before")
+    @classmethod
+    def default_environment_if_empty(cls, v: Any) -> Any:
+        """Sets ENVIRONMENT to default 'development' if empty or whitespace."""
+        if v is None or not str(v).strip():
+            return "development"
+        return str(v).strip()
 
     # <<< FIX 2: New validator to handle dependent default values >>>
     @model_validator(mode="after")
@@ -139,6 +188,15 @@ class ConfigService(BaseSettings):
             org.strip()
             for org in self.ALLOWED_ORGS_STR.split(",")
             if org.strip()
+        )
+
+    @computed_field
+    @property
+    def ALLOWED_EMAILS(self) -> set[str]:
+        return set(
+            email.strip()
+            for email in self.ALLOWED_EMAILS_STR.split(",")
+            if email.strip()
         )
 
     @computed_field

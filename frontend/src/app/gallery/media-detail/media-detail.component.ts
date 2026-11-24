@@ -37,6 +37,24 @@ import {
 import {GalleryService} from '../gallery.service';
 import {ConfirmationDialogComponent} from '../../common/components/confirmation-dialog/confirmation-dialog.component';
 import {WorkspaceStateService} from '../../services/workspace/workspace-state.service';
+import {FolderService} from '../../common/services/folder.service';
+import {FolderBreadcrumb} from '../../common/models/folder.model';
+import {MODEL_CONFIGS} from '../../common/config/model-config';
+import {DEFAULT_OMNI_MODEL} from '../../services/video-state.service';
+
+/**
+ * One segment of the location trail shown above the media details.
+ * `id === null` marks the collapsed "…" segment that stands in for the
+ * folders hidden between the root folder and the last two ancestors.
+ */
+export interface LocationCrumb {
+  id: number | null;
+  name: string;
+  tooltip?: string;
+}
+
+/** Folder segments shown before the trail collapses the middle into "…". */
+export const MAX_VISIBLE_FOLDER_CRUMBS = 3;
 
 @Component({
   selector: 'app-media-detail',
@@ -51,11 +69,59 @@ export class MediaDetailComponent implements OnDestroy {
   public mediaItem: GalleryItem | undefined;
   public isAdmin = false;
   public initialSlideIndex = 0;
+  public currentImageIndex = 0;
   promptJson: any | undefined;
   isPromptExpanded = false;
   public isIdentityExpanded = false;
   public selectedAssetForLightbox: GalleryItem | null = null;
   public lightboxInitialIndex = 0;
+
+  /**
+   * Root→leaf ancestors of the folder that holds this item ([] = All Media).
+   * Assigning recomputes `locationCrumbs` exactly once: the trail is rendered
+   * with `*ngFor`, and a getter returning fresh objects on every change
+   * detection would re-create the buttons between mousedown and mouseup,
+   * silently swallowing clicks.
+   */
+  get folderBreadcrumbs(): FolderBreadcrumb[] {
+    return this._folderBreadcrumbs;
+  }
+  set folderBreadcrumbs(crumbs: FolderBreadcrumb[]) {
+    this._folderBreadcrumbs = crumbs ?? [];
+    this.locationCrumbs = MediaDetailComponent.buildLocationCrumbs(
+      this._folderBreadcrumbs,
+    );
+  }
+  private _folderBreadcrumbs: FolderBreadcrumb[] = [];
+  private breadcrumbSub?: Subscription;
+
+  /** Stable, memoised folder segments for the location trail. */
+  public locationCrumbs: LocationCrumb[] = [];
+
+  /**
+   * Long paths keep the first folder and the last two, and collapse
+   * everything in between into a single "…" segment whose tooltip lists
+   * the hidden folder names.
+   */
+  private static buildLocationCrumbs(
+    crumbs: FolderBreadcrumb[],
+  ): LocationCrumb[] {
+    if (crumbs.length <= MAX_VISIBLE_FOLDER_CRUMBS) {
+      return crumbs.map(c => ({id: c.id, name: c.name}));
+    }
+    const first = crumbs[0];
+    const tail = crumbs.slice(-2);
+    const hidden = crumbs.slice(1, -2);
+    return [
+      {id: first.id, name: first.name},
+      {id: null, name: '…', tooltip: hidden.map(h => h.name).join(' › ')},
+      ...tail.map(c => ({id: c.id, name: c.name})),
+    ];
+  }
+
+  trackCrumb(_index: number, crumb: LocationCrumb): number | string {
+    return crumb.id ?? 'ellipsis';
+  }
 
   get identityFields(): {label: string; value: any; type: string}[] {
     if (!this.mediaItem) return [];
@@ -145,6 +211,10 @@ export class MediaDetailComponent implements OnDestroy {
     );
   }
 
+  get isYoutubeVideo(): boolean {
+    return (this.mediaItem as any)?.metadata?.assetType === 'youtube_video';
+  }
+
   constructor(
     private route: ActivatedRoute,
     private router: Router,
@@ -154,6 +224,7 @@ export class MediaDetailComponent implements OnDestroy {
     private authService: AuthService,
     private sanitizer: DomSanitizer,
     private workspaceStateService: WorkspaceStateService,
+    private folderService: FolderService,
     public dialog: MatDialog,
   ) {
     // Check if user is admin
@@ -177,6 +248,7 @@ export class MediaDetailComponent implements OnDestroy {
   ngOnDestroy(): void {
     this.routeSub?.unsubscribe();
     this.mediaSub?.unsubscribe();
+    this.breadcrumbSub?.unsubscribe();
   }
 
   fetchMediaDetails(id: number, isAsset = false): void {
@@ -191,7 +263,7 @@ export class MediaDetailComponent implements OnDestroy {
         this.loadingService.hide();
         this.readInitialIndexFromUrl();
         this.parsePrompt();
-        console.log('fetchMediaDetails - mediaItem', this.mediaItem);
+        this.loadFolderBreadcrumbs();
       },
       error: err => {
         console.error('Failed to fetch media details', err);
@@ -200,6 +272,45 @@ export class MediaDetailComponent implements OnDestroy {
         handleErrorSnackbar(this._snackBar, err, 'Fetch details');
       },
     });
+  }
+
+  /**
+   * Resolves the folder path of the current item for the location trail.
+   * Uses the item's own workspace (not the active one) so direct links to
+   * items in other workspaces still render where the file lives. Failures
+   * only degrade the trail to "All Media" — they never block the page.
+   */
+  private loadFolderBreadcrumbs(): void {
+    this.breadcrumbSub?.unsubscribe();
+    const folderId = this.mediaItem?.folderId;
+    if (!folderId) {
+      this.folderBreadcrumbs = [];
+      return;
+    }
+    this.breadcrumbSub = this.folderService
+      .getBreadcrumbs(folderId, this.mediaItem?.workspaceId)
+      .subscribe({
+        next: crumbs => {
+          this.folderBreadcrumbs = crumbs ?? [];
+        },
+        error: err => {
+          console.warn('Could not resolve folder location for media', err);
+          this.folderBreadcrumbs = [];
+        },
+      });
+  }
+
+  /** Called by the lightbox after a successful "Move to folder". */
+  onMediaMoved(folderId: number | null): void {
+    if (!this.mediaItem) return;
+    this.mediaItem.folderId = folderId ?? undefined;
+    this.loadFolderBreadcrumbs();
+  }
+
+  /** Navigates to a folder in the gallery; `null` means "All Media". */
+  navigateToFolder(crumb: LocationCrumb | null): void {
+    if (crumb && crumb.id === null) return; // collapsed "…" segment
+    void this.router.navigate(crumb ? ['/folders', crumb.id] : ['/gallery']);
   }
 
   private parsePrompt(): void {
@@ -234,8 +345,29 @@ export class MediaDetailComponent implements OnDestroy {
         index < (this.mediaItem?.presignedUrls?.length || 0)
       ) {
         this.initialSlideIndex = index;
+        this.currentImageIndex = index;
       }
     }
+  }
+
+  get currentTitle(): string {
+    if (!this.mediaItem) return 'Details';
+    const index = this.currentImageIndex;
+    const titles = this.mediaItem.titles;
+    if (titles && titles[index]) {
+      return titles[index];
+    }
+    return titles?.[0] || 'Details';
+  }
+
+  get currentDescription(): string | undefined {
+    if (!this.mediaItem) return undefined;
+    const index = this.currentImageIndex;
+    const descriptions = this.mediaItem.descriptions;
+    if (descriptions && descriptions[index]) {
+      return descriptions[index];
+    }
+    return descriptions?.[0];
   }
 
   /**
@@ -291,7 +423,7 @@ export class MediaDetailComponent implements OnDestroy {
             this._snackBar,
             'Template created successfully!',
           );
-          void this.router.navigate(['/templates/edit', newTemplate.id]);
+          void this.router.navigate(['/admin/media-templates']);
         },
         error: err => {
           this.loadingService.hide();
@@ -362,6 +494,49 @@ export class MediaDetailComponent implements OnDestroy {
     void this.router.navigate(['/video'], navigationExtras);
   }
 
+  handleEditWithOmni(event: {mediaItem: any; selectedIndex: number}): void {
+    if (!this.mediaItem) {
+      return;
+    }
+
+    const index = event.selectedIndex;
+    const mime = this.mediaItem.mimeType || '';
+    if (mime.startsWith('audio/')) {
+      return;
+    }
+
+    const itemModelConfig = MODEL_CONFIGS.find(
+      cfg => cfg.type === 'VIDEO' && cfg.value === this.mediaItem?.model,
+    );
+    const activeOmniModel =
+      (itemModelConfig?.capabilities.maxReferenceVideos ?? 0) > 0
+        ? itemModelConfig!.value
+        : DEFAULT_OMNI_MODEL;
+
+    const videoRef = {
+      id: this.mediaItem.id,
+      type: this.mediaItem.itemType || 'media_item',
+      index: index,
+      previewUrl:
+        this.mediaItem.presignedThumbnailUrls?.[index] ||
+        this.mediaItem.presignedUrls?.[index] ||
+        '',
+    };
+
+    const remixState = {
+      parentMediaItemId: this.mediaItem.id,
+      parentMediaIndex: index,
+      generationModel: activeOmniModel,
+      isOmniMode: true,
+      referenceVideos: [videoRef],
+    };
+
+    const navigationExtras: NavigationExtras = {
+      state: {remixState},
+    };
+    void this.router.navigate(['/video'], navigationExtras);
+  }
+
   sendToVto(index: number): void {
     if (!this.mediaItem) {
       return;
@@ -394,13 +569,22 @@ export class MediaDetailComponent implements OnDestroy {
       role: 'video_extension_source',
     };
 
+    const currentModelConfig = MODEL_CONFIGS.find(
+      m => m.type === 'VIDEO' && m.value === this.mediaItem?.model,
+    );
+    const supportsExtend =
+      currentModelConfig?.capabilities.supportedModes.includes('Extend Video');
+    const extendModel =
+      supportsExtend && currentModelConfig
+        ? currentModelConfig.value
+        : DEFAULT_OMNI_MODEL;
+
     const remixState = {
-      prompt: this.mediaItem.prompt,
       sourceMediaItems: [sourceMediaItem],
-      // Since it's a video, we can use the thumbnail as a preview.
       startImagePreviewUrl:
-        this.mediaItem.presignedThumbnailUrls?.[event.selectedIndex],
-      generationModel: 'veo-2.0-generate-001', // Switch to Veo 2 for video input
+        this.mediaItem.presignedThumbnailUrls?.[event.selectedIndex] ||
+        this.mediaItem.presignedUrls?.[event.selectedIndex],
+      generationModel: extendModel,
     };
 
     const navigationExtras: NavigationExtras = {

@@ -25,7 +25,7 @@ from src.admin.dto.admin_response_dto import (
 )
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_overview_stats():
     mock_repo = MagicMock()
     mock_repo.get_overview_stats = AsyncMock(
@@ -52,7 +52,7 @@ async def test_get_overview_stats():
     assert result.total_media == 175
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_media_over_time():
     mock_repo = MagicMock()
     mock_repo.get_media_over_time = AsyncMock(
@@ -70,7 +70,7 @@ async def test_get_media_over_time():
     assert result[0].total_generated == 10
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_workspace_stats():
     mock_repo = MagicMock()
     mock_repo.get_workspace_stats = AsyncMock(
@@ -93,7 +93,7 @@ async def test_get_workspace_stats():
     assert result[0].total_media == 10
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_active_roles():
     mock_repo = MagicMock()
     mock_repo.get_active_roles = AsyncMock(
@@ -107,7 +107,7 @@ async def test_get_active_roles():
     assert result[0].count == 2
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_generation_health():
     mock_repo = MagicMock()
     mock_repo.get_generation_health = AsyncMock(
@@ -121,19 +121,24 @@ async def test_get_generation_health():
     assert result[0].count == 8
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_active_users_monthly():
+    from unittest.mock import patch
+    from datetime import datetime
+
     mock_repo = MagicMock()
     mock_repo.get_active_users_monthly_counts = AsyncMock(
         return_value={"2026-04": 3}
     )
 
-    service = AdminService(admin_repo=mock_repo)
-    result = await service.get_active_users_monthly()
-    assert len(result) == 7  # Default 180 days should yield 7 months
+    with patch("src.admin.admin_service.datetime") as mock_datetime:
+        mock_datetime.today.return_value = datetime(2026, 7, 1)
+        service = AdminService(admin_repo=mock_repo)
+        result = await service.get_active_users_monthly()
+        assert len(result) == 7  # Default 180 days should yield 7 months
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_cleanup_stuck_jobs():
     mock_repo = MagicMock()
     mock_repo.cleanup_stuck_jobs = AsyncMock(return_value=5)

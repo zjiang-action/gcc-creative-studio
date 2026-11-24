@@ -13,12 +13,16 @@
 # limitations under the License.
 
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from fastapi import Query
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PositiveInt, field_validator, model_validator
+
+from src.common.media_utils import extract_youtube_video_id
 
 from src.common.base_dto import (
     AspectRatioEnum,
+    AssetReferenceDto,
     BaseDto,
     ColorAndToneEnum,
     CompositionEnum,
@@ -41,8 +45,22 @@ class CreateImagenDto(BaseDto):
         ge=1,
         description="The ID of the workspace for this generation.",
     )
+
+    metadata_generation_model: GenerationModelEnum | str | None = Field(
+        default=GenerationModelEnum.GEMINI_3_5_FLASH,
+        description="The Gemini model to use for synchronous metadata generation.",
+    )
+    titles: list[str] | None = Field(
+        default=None,
+        description="Optional titles for the generated images.",
+    )
+    descriptions: list[str] | None = Field(
+        default=None,
+        description="Optional descriptions for the generated images.",
+    )
+
     generation_model: GenerationModelEnum = Field(
-        default=GenerationModelEnum.IMAGEN_4_ULTRA,
+        default=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
         description="Model used for image generation.",
     )
     aspect_ratio: AspectRatioEnum = Field(
@@ -105,37 +123,78 @@ class CreateImagenDto(BaseDto):
         description="Whether to use Google Search for image generation.",
     )
     resolution: Literal["1K", "2K", "4K"] = Field(
-        default="4K",
+        default="1K",
         description="Resolution of the generated image.",
     )
+    file_name: str | None = Field(
+        default=None,
+        description="Optional name for the generated media.",
+    )
+    reference_video: AssetReferenceDto | None = Field(
+        default=None,
+        description="Optional video asset reference for Video to Image generation.",
+    )
+    external_url: str | None = Field(
+        default=None,
+        description="Optional external URL (e.g. YouTube video URL) for Video to Image generation.",
+    )
+    folder_id: PositiveInt | None = Field(
+        default=None,
+        description="Optional gallery folder (same workspace) to save the generated media into. Defaults to the root folder.",
+    )
+
+    @field_validator("external_url")
+    @classmethod
+    def validate_youtube_url(cls, value: str | None) -> str | None:
+        if not value:
+            return value
+        try:
+            parsed = urlparse(value.strip())
+        except Exception:
+            raise ValueError("Invalid YouTube URL provided.")
+        valid_hosts = {
+            "youtube.com",
+            "www.youtube.com",
+            "m.youtube.com",
+            "youtu.be",
+            "youtube-nocookie.com",
+            "www.youtube-nocookie.com",
+        }
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.hostname.lower() not in valid_hosts
+        ):
+            raise ValueError("Invalid YouTube URL provided.")
+
+        if not extract_youtube_video_id(value):
+            raise ValueError(
+                "YouTube URL does not contain a valid 11-character video ID."
+            )
+        return value.strip()
 
     @field_validator("prompt")
+    @classmethod
     def prompt_must_not_be_empty(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("Prompt cannot be empty or whitespace only")
         return value
 
     @field_validator("generation_model")
+    @classmethod
     def validate_imagen_generation_model(
         cls,
         value: GenerationModelEnum,
     ) -> GenerationModelEnum:
         """Ensures that only supported generation models for imagen are used."""
         valid_generation_models = [
-            GenerationModelEnum.IMAGEN_4_UPSCALE_PREVIEW,
-            GenerationModelEnum.IMAGEGEN_002,
-            GenerationModelEnum.IMAGEGEN_005,
-            GenerationModelEnum.IMAGEGEN_006,
-            GenerationModelEnum.IMAGEN_3_001,
-            GenerationModelEnum.IMAGEN_3_002,
-            GenerationModelEnum.IMAGEN_3_FAST,
-            GenerationModelEnum.IMAGEN_4_FAST,
-            GenerationModelEnum.IMAGEN_4_ULTRA,
-            GenerationModelEnum.IMAGEN_4_001,
             GenerationModelEnum.GEMINI_2_5_FLASH_IMAGE_PREVIEW,
             GenerationModelEnum.GEMINI_2_5_FLASH_IMAGE,
             GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW,
+            GenerationModelEnum.GEMINI_3_PRO_IMAGE,
             GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
+            GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+            GenerationModelEnum.GEMINI_3_1_FLASH_LITE_IMAGE,
         ]
         if value not in valid_generation_models:
             raise ValueError("Invalid generation model for imagen.")
@@ -154,13 +213,37 @@ class CreateImagenDto(BaseDto):
         generated_inputs_count = (
             len(self.source_media_items) if self.source_media_items else 0
         )
-        total_inputs = source_assets_count + generated_inputs_count
+        video_refs_count = (1 if self.reference_video else 0) + (
+            1 if self.external_url else 0
+        )
+        total_inputs = (
+            source_assets_count + generated_inputs_count + video_refs_count
+        )
         model = self.generation_model
 
         # Aspect Ratio Validation
-        if self.aspect_ratio not in model.valid_aspect_ratios:
+        if self.aspect_ratio == AspectRatioEnum.AUTO:
+            if not model.is_gemini_image_model:
+                raise ValueError(
+                    f"Auto aspect ratio is not supported for model {model.value}.",
+                )
+            if total_inputs == 0:
+                raise ValueError(
+                    "Auto aspect ratio is only supported when input/reference images are provided (Ingredients to Image mode).",
+                )
+        elif self.aspect_ratio not in model.valid_aspect_ratios:
             raise ValueError(
                 f"Aspect ratio {self.aspect_ratio} is not supported for model {model.value}.",
+            )
+
+        if self.reference_video and self.external_url:
+            raise ValueError(
+                "Cannot provide both a reference video file and an external URL simultaneously."
+            )
+
+        if video_refs_count > 0 and not model.is_gemini_image_model:
+            raise ValueError(
+                f"Model '{model.value}' does not support video references."
             )
 
         if total_inputs == 0:
@@ -173,16 +256,17 @@ class CreateImagenDto(BaseDto):
                 f"A maximum of {max_inputs} total inputs are allowed for model {model.value}.",
             )
 
-        # Imagen-specific editing validation
+        # Editing validation
         if not model.is_gemini_image_model:
-            allowed_editing_models = [
-                GenerationModelEnum.IMAGEN_3_FAST,
-                GenerationModelEnum.IMAGEN_3_002,
-            ]
-            if model not in allowed_editing_models:
+            raise ValueError(
+                f"Model '{model.value}' does not support image editing."
+            )
+
+        # Resolution Validation
+        if model == GenerationModelEnum.GEMINI_3_1_FLASH_LITE_IMAGE:
+            if self.resolution != "1K":
                 raise ValueError(
-                    f"Model '{model.value}' does not support image editing with Imagen. "
-                    "Please use 'imagen-3.0-fast-generate-001' or 'imagen-3.0-generate-002'.",
+                    f"Model '{model.value}' only supports 1K resolution."
                 )
 
         return self

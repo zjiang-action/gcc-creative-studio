@@ -14,7 +14,14 @@
  * limitations under the License.
  */
 
-import {Component, Inject, OnInit, ViewChild} from '@angular/core';
+import {
+  Component,
+  Inject,
+  OnInit,
+  ViewChild,
+  computed,
+  signal,
+} from '@angular/core';
 import {
   MAT_DIALOG_DATA,
   MatDialog,
@@ -28,13 +35,52 @@ import {
 } from '../../services/source-asset.service';
 import {AssetTypeEnum} from '../../../admin/source-assets-management/source-asset.model';
 import {MediaItem} from '../../models/media-item.model';
+import {
+  FolderSelectionResult,
+  GalleryFolderLocation,
+} from '../../models/folder.model';
 import {MediaGalleryComponent} from '../../../gallery/media-gallery/media-gallery.component';
 import {ImageCropperDialogComponent} from '../image-cropper-dialog/image-cropper-dialog.component';
+
+export type SelectorMimeType =
+  | 'image/*'
+  | 'image/png'
+  | 'video/mp4'
+  | 'video/*'
+  | 'audio/*'
+  | 'audio/mpeg'
+  | null;
 
 export interface MediaItemSelection {
   mediaItem: MediaItem;
   selectedIndex: number;
 }
+
+/** What the selector dialog returns: media items (default) or a folder. */
+export type ImageSelectorTarget = 'media' | 'folder';
+
+export interface ImageSelectorDialogData {
+  mimeType: SelectorMimeType;
+  assetType: AssetTypeEnum;
+  enableUpscale?: boolean;
+  multiSelect?: boolean;
+  showFooter?: boolean;
+  maxSelection?: number;
+  includeExternal?: boolean;
+  /** Optional for backward compatibility with existing callers; defaults to 'media'. */
+  selectionTarget?: ImageSelectorTarget;
+  /** Folder mode only; null = root. */
+  initialFolderId?: number | null;
+  /**
+   * Only the first image of each multi-image media item can be picked.
+   * For consumers (e.g. the Izumi agent) that address a media item by id
+   * and always resolve its first index.
+   */
+  firstIndexOnly?: boolean;
+}
+
+const ROOT_FOLDER_LABEL = 'All Media';
+const FOLDER_PATH_SEPARATOR = ' / ';
 
 @Component({
   selector: 'app-image-selector',
@@ -48,6 +94,25 @@ export class ImageSelectorComponent implements OnInit {
   shouldCrop = false;
   currentUserEmail: string | null = null;
 
+  /** True when the dialog is used to pick a folder instead of media. */
+  readonly isFolderMode: boolean;
+  readonly title: string;
+  readonly initialFolderId: number | null;
+  readonly currentLocation = signal<GalleryFolderLocation>({
+    folderId: null,
+    breadcrumbs: [],
+  });
+  readonly currentPath = computed(() => {
+    const names = this.currentLocation().breadcrumbs.map(crumb => crumb.name);
+    return names.length > 0
+      ? names.join(FOLDER_PATH_SEPARATOR)
+      : ROOT_FOLDER_LABEL;
+  });
+  /** The root is never a valid folder selection. */
+  readonly canConfirmFolder = computed(
+    () => this.currentLocation().folderId !== null,
+  );
+
   @ViewChild(MediaGalleryComponent) mediaGallery!: MediaGalleryComponent;
 
   constructor(
@@ -56,23 +121,12 @@ export class ImageSelectorComponent implements OnInit {
     private dialog: MatDialog,
     private userService: UserService,
     @Inject(MAT_DIALOG_DATA)
-    public data: {
-      mimeType:
-        | 'image/*'
-        | 'image/png'
-        | 'video/mp4'
-        | 'video/*'
-        | 'audio/*'
-        | 'audio/mpeg'
-        | null;
-      assetType: AssetTypeEnum;
-      enableUpscale?: boolean;
-      multiSelect?: boolean;
-      showFooter?: boolean;
-      maxSelection?: number;
-    },
+    public data: ImageSelectorDialogData,
   ) {
     this.dialogRef.addPanelClass('image-selector-dialog');
+    this.isFolderMode = (data.selectionTarget ?? 'media') === 'folder';
+    this.title = this.isFolderMode ? 'Select a Folder' : 'Select Media';
+    this.initialFolderId = data.initialFolderId ?? null;
   }
 
   ngOnInit(): void {
@@ -80,27 +134,54 @@ export class ImageSelectorComponent implements OnInit {
     this.currentUserEmail = userDetails?.email || null;
   }
 
+  onCurrentFolderChange(location: GalleryFolderLocation): void {
+    this.currentLocation.set(location);
+  }
+
+  /** Closes the dialog with the currently open folder (no-op at root). */
+  confirmFolderSelection(): void {
+    const {folderId, breadcrumbs} = this.currentLocation();
+    if (folderId === null) {
+      return;
+    }
+    const current = breadcrumbs[breadcrumbs.length - 1];
+    const result: FolderSelectionResult = {
+      folderId,
+      folderName: current?.name ?? '',
+      path: this.currentPath(),
+    };
+    this.dialogRef.close(result);
+  }
+
   // This method is called by the file input or drop event inside this component
   handleFileSelect(file: File): void {
-    if (file.type.startsWith('image/')) {
+    if (this.isFolderMode) {
+      return;
+    }
+    const isImage =
+      file.type.startsWith('image/') ||
+      /\.(jpg|jpeg|png|gif|webp|avif)$/i.test(file.name);
+    const isVideoOrAudio =
+      file.type.startsWith('video/') ||
+      file.type.startsWith('audio/') ||
+      /\.(mp4|webm|mov|avi|mkv|mp3|wav|ogg|m4a|aac|flac|wma)$/i.test(file.name);
+
+    if (isImage) {
       if (this.shouldCrop) {
         // If shouldCrop is true, open the cropper dialog
-        const cropperDialogRef = this.dialog.open(ImageCropperDialogComponent, {
-          data: {
-            imageFile: file,
-            assetType: this.data.assetType,
-            enableUpscale: this.data.enableUpscale,
-          },
-          width: '600px',
+        const cropperDialogRef = ImageCropperDialogComponent.open(this.dialog, {
+          imageFile: file,
+          assetType: this.data.assetType,
+          enableUpscale: this.data.enableUpscale,
         });
 
-        cropperDialogRef
-          .afterClosed()
-          .subscribe((asset: SourceAssetResponseDto) => {
+        cropperDialogRef.subscribe(
+          (asset: SourceAssetResponseDto | undefined) => {
             if (asset) {
               this.dialogRef.close(asset);
             }
-          });
+          },
+        );
       } else {
         // If shouldCrop is false, upload directly
         this.isUploading = true;
@@ -113,10 +194,7 @@ export class ImageSelectorComponent implements OnInit {
             }
           });
       }
-    } else if (
-      file.type.startsWith('video/') ||
-      file.type.startsWith('audio/')
-    ) {
+    } else if (isVideoOrAudio) {
       // If it's a video or audio, upload it directly from here
       this.isUploading = true;
       this.uploadMediaDirectly(file)
@@ -152,28 +230,84 @@ export class ImageSelectorComponent implements OnInit {
     event.preventDefault();
     event.stopPropagation();
     this.isDragging = false;
-    if (event.dataTransfer?.files[0]) {
-      this.handleFileSelect(event.dataTransfer.files[0]);
+    if (this.isUploading || this.isFolderMode) return;
+
+    let file: File | null = null;
+    const dt = event.dataTransfer;
+
+    // Debug logging synchronously before the event context is lost
+    const debugItems = dt?.items
+      ? Array.from(dt.items).map(i => ({kind: i.kind, type: i.type}))
+      : [];
+    const debugFiles = dt?.files ? dt.files.length : 0;
+
+    if (dt?.files && dt.files.length > 0) {
+      file = dt.files[0];
+    } else if (dt?.items) {
+      const items = Array.from(dt.items);
+      const fileItem = items.find(item => item.kind === 'file');
+      if (fileItem) {
+        file = fileItem.getAsFile();
+      } else {
+        // Try to handle dragging an image from another webpage
+        const uriItem = items.find(item => item.type === 'text/uri-list');
+        if (uriItem) {
+          this.isUploading = true;
+          uriItem.getAsString(uriList => {
+            // text/uri-list can have multiple lines, take the first valid URL
+            const url = uriList
+              .split('\n')
+              .find(line => line.trim() && !line.startsWith('#'))
+              ?.trim();
+            if (url) {
+              this.sourceAssetService.downloadExternalAsset(url).subscribe({
+                next: blob => {
+                  const fetchedFile = new File([blob], 'downloaded_image', {
+                    type: blob.type,
+                  });
+                  this.isUploading = false;
+                  this.handleFileSelect(fetchedFile);
+                },
+                error: err => {
+                  console.error(
+                    'Failed to fetch image from dropped URL',
+                    url,
+                    err,
+                  );
+                  this.isUploading = false;
+                  alert(
+                    'Could not download the dropped image directly from the browser due to cross-origin security restrictions (CORS). Please drag the image to your Desktop first, then drag it here.',
+                  );
+                },
+              });
+            } else {
+              this.isUploading = false;
+            }
+          });
+          return; // We are handling the upload asynchronously
+        }
+      }
     }
-  }
 
-  openCropperDialog(file: File): void {
-    if (file.type.startsWith('image/')) {
-      this.dialogRef.close();
-
-      this.dialog.open(ImageCropperDialogComponent, {
-        data: {
-          imageFile: file,
-          assetType: this.data.assetType,
-        },
-        width: '600px',
-      });
+    if (file) {
+      this.handleFileSelect(file);
     } else {
-      console.log('File is not an image, cannot open cropper.');
+      console.error(
+        'No valid file found in drop event. items:',
+        debugItems,
+        'files count:',
+        debugFiles,
+      );
+      alert(
+        'Could not read the dropped file. This happens if the file was dragged from an unsupported app. Try selecting it via the upload button instead.',
+      );
     }
   }
 
   onMediaSelected(selection: MediaItemSelection): void {
+    if (this.isFolderMode) {
+      return;
+    }
     const item = selection.mediaItem as any;
     const id = `${item.itemType || 'media_item'}:${item.id}`;
     if (this.selectedMediaItems.has(id)) {
@@ -194,6 +328,9 @@ export class ImageSelectorComponent implements OnInit {
   }
 
   onMediaItemSelected(selection: MediaItemSelection): void {
+    if (this.isFolderMode) {
+      return;
+    }
     if (this.data.multiSelect || this.data.showFooter) {
       // In multi-select mode or when footer is shown, we don't close on single item selection
       // Instead, we just let MediaGalleryComponent handle the toggle and wait for Select btn
@@ -264,6 +401,9 @@ export class ImageSelectorComponent implements OnInit {
   onDragOver(event: DragEvent) {
     event.preventDefault();
     event.stopPropagation();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy';
+    }
     this.isDragging = true;
   }
 

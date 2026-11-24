@@ -14,10 +14,12 @@
 """Tests for Imagen Service."""
 
 
+import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from PIL import Image as PILImage
 
 from src.common.base_dto import AspectRatioEnum, GenerationModelEnum
 from src.common.schema.media_item_model import (
@@ -100,8 +102,49 @@ def fixture_sample_create_imagen_dto():
     return CreateImagenDto(
         workspace_id=1,
         prompt="A sunset on a beach",
-        generation_model=GenerationModelEnum.IMAGEN_3_001,
+        generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
         aspect_ratio="1:1",
+    )
+
+
+RESOLVED_FOLDER_ID = 77
+
+
+async def _assign_placeholder_id(item: MediaItemModel) -> MediaItemModel:
+    """``media_repo.create`` stand-in that returns the saved placeholder."""
+    item.id = 900
+    return item
+
+
+def _start_imagen_job(imagen_service, job, user, executor, folder_id):
+    """Starts the generate, VTO or upscale job with an output folder."""
+    if job == "generate":
+        return imagen_service.start_image_generation_job(
+            request_dto=CreateImagenDto(
+                workspace_id=1, prompt="A cat", folder_id=folder_id
+            ),
+            user=user,
+            executor=executor,
+        )
+    if job == "vto":
+        return imagen_service.start_vto_generation_job(
+            request_dto=VtoDto(
+                workspace_id=1,
+                person_image={"source_asset_id": 101},
+                top_image={"source_asset_id": 102},
+                folder_id=folder_id,
+            ),
+            user=user,
+            executor=executor,
+        )
+    return imagen_service.start_upload_upscale_job(
+        user=user,
+        executor=executor,
+        workspace_id=1,
+        gcs_uri="gs://input/original.png",
+        mime_type="image/png",
+        file_bytes=b"fake_bytes",
+        folder_id=folder_id,
     )
 
 
@@ -124,7 +167,7 @@ class TestImagenServiceMethods:
             user_id=1,
             user_email="test@example.com",
             mime_type=MimeTypeEnum.IMAGE_PNG,
-            model=GenerationModelEnum.IMAGEN_4_UPSCALE_PREVIEW,
+            model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
             aspect_ratio="1:1",
             gcs_uris=[],
             original_gcs_uris=[],
@@ -150,76 +193,231 @@ class TestImagenServiceMethods:
         mock_executor.submit.assert_called_once()
 
     @pytest.mark.anyio
-    async def test_upscale_image_success(self, imagen_service):
+    async def test_upscale_image_gemini_success(self, imagen_service):
         request_dto = UpscaleImagenDto(
             user_image="gs://bucket/input.png",
             upscale_factor="x4",
-            include_rai_reason=False,
-            enhance_input_image=False,
-            image_preservation_factor=1.0,
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
         )
 
-        with patch(
-            "src.images.imagen_service.GenAIModelSetup.init"
-        ) as mock_init:
-            mock_client = MagicMock()
-            mock_init.return_value = mock_client
+        with (
+            patch(
+                "src.images.imagen_service.gemini_generate_image"
+            ) as mock_gemini_gen,
+            patch(
+                "src.images.imagen_service.GenAIModelSetup.get_global_client"
+            ),
+        ):
+            mock_gen_img = MagicMock()
+            mock_gen_img.image.gcs_uri = "gs://bucket/upscaled.png"
+            mock_gemini_gen.return_value = (mock_gen_img, None)
 
-            mock_response = MagicMock()
-            mock_generated_image = MagicMock()
-            mock_generated_image.image.image_bytes = b"fake_upscaled_bytes"
-            mock_generated_image.rai_filtered_reason = ""
-            mock_response.generated_images = [mock_generated_image]
-
-            mock_client.models.upscale_image.return_value = mock_response
-
-            # Call
             result = await imagen_service.upscale_image(request_dto)
 
             assert result is not None
+            assert result.image.gcs_uri == "gs://bucket/upscaled.png"
+            # Verify prompt contains default preservation
+            called_prompt = mock_gemini_gen.call_args.kwargs["prompt"]
+            assert "Faithfully preserve the exact composition" in called_prompt
 
     @pytest.mark.anyio
-    async def test_upscale_image_rai_filtered(self, imagen_service):
-        from src.images.dto.upscale_imagen_dto import UpscaleImagenDto
+    async def test_upscale_image_with_enhancement_and_strict_preservation(
+        self, imagen_service
+    ):
+        request_dto = UpscaleImagenDto(
+            user_image="gs://bucket/input.png",
+            upscale_factor="x2",
+            enhance_input_image=True,
+            image_preservation_factor=0.9,
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+        )
+
+        with (
+            patch(
+                "src.images.imagen_service.gemini_generate_image"
+            ) as mock_gemini_gen,
+            patch(
+                "src.images.imagen_service.GenAIModelSetup.get_global_client"
+            ),
+        ):
+            mock_gen_img = MagicMock()
+            mock_gen_img.image.gcs_uri = "gs://bucket/upscaled.png"
+            mock_gemini_gen.return_value = (mock_gen_img, None)
+
+            result = await imagen_service.upscale_image(request_dto)
+
+            assert result is not None
+            called_prompt = mock_gemini_gen.call_args.kwargs["prompt"]
+            assert "Apply active enhancement" in called_prompt
+            assert "strict preservation" in called_prompt
+            assert "0.90" in called_prompt
+
+    @pytest.mark.anyio
+    async def test_upscale_image_with_balanced_and_creative_preservation(
+        self, imagen_service
+    ):
+        # Test balanced preservation
+        request_dto_balanced = UpscaleImagenDto(
+            user_image="gs://bucket/input.png",
+            upscale_factor="x2",
+            image_preservation_factor=0.5,
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+        )
+        with (
+            patch(
+                "src.images.imagen_service.gemini_generate_image"
+            ) as mock_gemini_gen,
+            patch(
+                "src.images.imagen_service.GenAIModelSetup.get_global_client"
+            ),
+        ):
+            mock_gen_img = MagicMock()
+            mock_gen_img.image.gcs_uri = "gs://bucket/upscaled.png"
+            mock_gemini_gen.return_value = (mock_gen_img, None)
+
+            await imagen_service.upscale_image(request_dto_balanced)
+            called_prompt = mock_gemini_gen.call_args.kwargs["prompt"]
+            assert "balanced preservation" in called_prompt
+            assert "0.50" in called_prompt
+
+        # Test creative preservation
+        request_dto_creative = UpscaleImagenDto(
+            user_image="gs://bucket/input.png",
+            upscale_factor="x2",
+            image_preservation_factor=0.2,
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+        )
+        with (
+            patch(
+                "src.images.imagen_service.gemini_generate_image"
+            ) as mock_gemini_gen,
+            patch(
+                "src.images.imagen_service.GenAIModelSetup.get_global_client"
+            ),
+        ):
+            mock_gen_img = MagicMock()
+            mock_gen_img.image.gcs_uri = "gs://bucket/upscaled.png"
+            mock_gemini_gen.return_value = (mock_gen_img, None)
+
+            await imagen_service.upscale_image(request_dto_creative)
+            called_prompt = mock_gemini_gen.call_args.kwargs["prompt"]
+            assert "creative detail generation" in called_prompt
+            assert "0.20" in called_prompt
+
+    @pytest.mark.anyio
+    async def test_upscale_image_gemini_resize_and_4k_limit(
+        self, imagen_service
+    ):
+        # Create a real 1000x500 image
+        input_img = PILImage.new("RGB", (1000, 500), color="blue")
+        input_io = io.BytesIO()
+        input_img.save(input_io, format="PNG")
+        input_bytes = input_io.getvalue()
+
+        # Generated image from Gemini at 2048x1024
+        gen_img = PILImage.new("RGB", (2048, 1024), color="blue")
+        gen_io = io.BytesIO()
+        gen_img.save(gen_io, format="PNG")
+        gen_bytes = gen_io.getvalue()
+
+        imagen_service.gcs_service.download_bytes_from_gcs = MagicMock(
+            side_effect=[input_bytes, gen_bytes]
+        )
+        imagen_service.gcs_service.store_to_gcs = MagicMock(
+            return_value="gs://test-bucket/upscaled_images/upscaled_x4_resized.png"
+        )
 
         request_dto = UpscaleImagenDto(
             user_image="gs://bucket/input.png",
             upscale_factor="x4",
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
         )
-        with patch(
-            "src.images.imagen_service.GenAIModelSetup.init"
-        ) as mock_init:
-            mock_client = MagicMock()
-            mock_init.return_value = mock_client
-            mock_response = MagicMock()
-            mock_generated_image = MagicMock()
-            mock_generated_image.image = None  # Crucial to trigger RAI branch!
-            mock_generated_image.rai_filtered_reason = "unsafeContent"
-            mock_response.generated_images = [mock_generated_image]
 
-            mock_client.models.upscale_image.return_value = mock_response
+        with (
+            patch(
+                "src.images.imagen_service.gemini_generate_image"
+            ) as mock_gemini_gen,
+            patch(
+                "src.images.imagen_service.GenAIModelSetup.get_global_client"
+            ),
+        ):
+            mock_gen = MagicMock()
+            mock_gen.image.gcs_uri = "gs://bucket/gemini_images/raw.png"
+            mock_gemini_gen.return_value = (mock_gen, None)
 
-            with pytest.raises(
-                ValueError, match="Image upscaling filtered by RAI"
-            ):
-                await imagen_service.upscale_image(request_dto)
+            result = await imagen_service.upscale_image(request_dto)
+
+            assert result is not None
+            # 1000x500 * 4 = 4000x2000 (within 4096)
+            # Verify store_to_gcs was called with resized bytes
+            imagen_service.gcs_service.store_to_gcs.assert_called_once()
+            assert (
+                result.image.gcs_uri
+                == "gs://test-bucket/upscaled_images/upscaled_x4_resized.png"
+            )
 
     @pytest.mark.anyio
-    async def test_upscale_image_no_data(self, imagen_service):
-        from src.images.dto.upscale_imagen_dto import UpscaleImagenDto
+    async def test_upscale_image_gemini_base64_capped_4k(self, imagen_service):
+        import base64
+
+        # Create a 2000x1500 image -> * 4 would be 8000x6000 -> capped to 4096x3072
+        input_img = PILImage.new("RGB", (2000, 1500), color="red")
+        input_io = io.BytesIO()
+        input_img.save(input_io, format="PNG")
+        b64_str = base64.b64encode(input_io.getvalue()).decode("utf-8")
+
+        gen_img = PILImage.new("RGB", (2048, 1536), color="red")
+        gen_io = io.BytesIO()
+        gen_img.save(gen_io, format="PNG")
+        gen_bytes = gen_io.getvalue()
+
+        imagen_service.gcs_service.download_bytes_from_gcs = MagicMock(
+            return_value=gen_bytes
+        )
+        imagen_service.gcs_service.store_to_gcs = MagicMock(
+            return_value="gs://test-bucket/upscaled_images/upscaled_x4_capped.png"
+        )
 
         request_dto = UpscaleImagenDto(
-            user_image="gs://bucket/input.png",
+            user_image=b64_str,
             upscale_factor="x4",
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
         )
-        with patch(
-            "src.images.imagen_service.GenAIModelSetup.init"
-        ) as mock_init:
-            mock_client = MagicMock()
-            mock_init.return_value = mock_client
-            mock_response = MagicMock()
-            mock_response.generated_images = []  # Empty
-            mock_client.models.upscale_image.return_value = mock_response
+
+        with (
+            patch(
+                "src.images.imagen_service.gemini_generate_image"
+            ) as mock_gemini_gen,
+            patch(
+                "src.images.imagen_service.GenAIModelSetup.get_global_client"
+            ),
+        ):
+            mock_gen = MagicMock()
+            mock_gen.image.gcs_uri = "gs://bucket/gemini_images/raw.png"
+            mock_gemini_gen.return_value = (mock_gen, None)
+
+            result = await imagen_service.upscale_image(request_dto)
+
+            assert result is not None
+            imagen_service.gcs_service.store_to_gcs.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_upscale_image_gemini_failure(self, imagen_service):
+        request_dto = UpscaleImagenDto(
+            user_image="gs://bucket/input.png",
+            upscale_factor="x2",
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+        )
+
+        with (
+            patch(
+                "src.images.imagen_service.gemini_generate_image"
+            ) as mock_gemini_gen,
+            patch(
+                "src.images.imagen_service.GenAIModelSetup.get_global_client"
+            ),
+        ):
+            mock_gemini_gen.return_value = (None, None)
 
             with pytest.raises(
                 ValueError,
@@ -237,7 +435,7 @@ class TestImagenServiceMethods:
         request_dto = CreateImagenDto(
             workspace_id=1,
             prompt="A beautiful sunset",
-            generation_model=GenerationModelEnum.IMAGEN_3_001,
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
             aspect_ratio="1:1",
         )
 
@@ -248,7 +446,7 @@ class TestImagenServiceMethods:
             user_id=1,
             user_email="test@example.com",
             mime_type=MimeTypeEnum.IMAGE_PNG,
-            model=GenerationModelEnum.IMAGEN_3_001,
+            model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
             aspect_ratio="1:1",
             gcs_uris=[],
             original_gcs_uris=[],
@@ -326,7 +524,7 @@ class TestImagenServiceMethods:
             user_id=1,
             user_email="test@example.com",
             mime_type=MimeTypeEnum.IMAGE_PNG,
-            model=GenerationModelEnum.IMAGEN_4_UPSCALE_PREVIEW,
+            model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
             aspect_ratio="1:1",
             gcs_uris=[],
             original_gcs_uris=[],
@@ -393,6 +591,66 @@ class TestImagenServiceMethods:
         mock_executor.submit.assert_called_once()
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("requested_folder_id", [42, None])
+    @pytest.mark.parametrize("job", ["generate", "vto", "upscale"])
+    async def test_start_job_places_item_in_resolved_output_folder(
+        self,
+        job,
+        requested_folder_id,
+        imagen_service,
+        mock_media_repo,
+        sample_user,
+    ):
+        mock_media_repo.create.side_effect = _assign_placeholder_id
+        mock_executor = MagicMock()
+
+        with patch(
+            "src.images.imagen_service.resolve_output_folder_id",
+            AsyncMock(return_value=RESOLVED_FOLDER_ID),
+        ) as resolver:
+            response = await _start_imagen_job(
+                imagen_service,
+                job,
+                sample_user,
+                mock_executor,
+                requested_folder_id,
+            )
+
+        resolver.assert_awaited_once_with(
+            mock_media_repo.db, 1, sample_user, requested_folder_id
+        )
+        placeholder = mock_media_repo.create.call_args.args[0]
+        assert placeholder.folder_id == RESOLVED_FOLDER_ID
+        assert response.folder_id == RESOLVED_FOLDER_ID
+        mock_executor.submit.assert_called_once()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("job", ["generate", "vto", "upscale"])
+    async def test_start_job_with_invalid_output_folder_creates_nothing(
+        self, job, imagen_service, mock_media_repo, sample_user
+    ):
+        mock_executor = MagicMock()
+
+        with (
+            patch(
+                "src.images.imagen_service.resolve_output_folder_id",
+                AsyncMock(
+                    side_effect=HTTPException(
+                        status_code=422, detail="Folder not found"
+                    )
+                ),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await _start_imagen_job(
+                imagen_service, job, sample_user, mock_executor, 999
+            )
+
+        assert exc_info.value.status_code == 422
+        mock_media_repo.create.assert_not_called()
+        mock_executor.submit.assert_not_called()
+
+    @pytest.mark.anyio
     async def test_get_media_item_with_presigned_urls_success(
         self,
         imagen_service,
@@ -404,7 +662,7 @@ class TestImagenServiceMethods:
             user_id=1,
             user_email="test@example.com",
             mime_type=MimeTypeEnum.IMAGE_PNG,
-            model=GenerationModelEnum.IMAGEN_3_001,
+            model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
             aspect_ratio="1:1",
             gcs_uris=["gs://bucket/image.png"],
             original_gcs_uris=[],
@@ -450,12 +708,6 @@ def test_process_image_in_background_sync(
     mock_client = MagicMock()
     mock_genai_init.return_value = mock_client
 
-    mock_response = MagicMock()
-    mock_generated_image = MagicMock()
-    mock_generated_image.image.gcs_uri = "gs://bucket/output_0.png"
-    mock_response.generated_images = [mock_generated_image]
-
-    mock_client.models.generate_images.return_value = mock_response
     mock_thumb_mu.return_value = "gs://bucket/thumb_0.png"
     mock_thumb_is.return_value = "gs://bucket/thumb_0.png"
 
@@ -476,6 +728,9 @@ def test_process_image_in_background_sync(
         patch(
             "src.images.imagen_service.IamSignerCredentials",
         ) as mock_iam_class,
+        patch(
+            "src.images.imagen_service.gemini_generate_image",
+        ) as mock_gemini_gen,
     ):
         mock_media_repo = AsyncMock()
         mock_media_repo_class.return_value = mock_media_repo
@@ -489,6 +744,11 @@ def test_process_image_in_background_sync(
         mock_gcs = AsyncMock()
         mock_gcs.bucket_name = "test-bucket"
         mock_gcs_class.return_value = mock_gcs
+
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_0.png"
+        mock_result.image.mime_type = MimeTypeEnum.IMAGE_PNG
+        mock_gemini_gen.return_value = (mock_result, None)
 
         # Call the worker function
         _process_image_in_background(
@@ -598,14 +858,6 @@ def test_process_image_in_background_sync_with_upscale(
     mock_client = MagicMock()
     mock_genai_init.return_value = mock_client
 
-    # Mock generated images response
-    mock_response = MagicMock()
-    mock_img = MagicMock()
-    mock_img.image.gcs_uri = "gs://b/generated.png"
-    mock_img.image.mime_type = MimeTypeEnum.IMAGE_PNG
-    mock_response.generated_images = [mock_img]
-    mock_client.models.generate_images.return_value = mock_response
-
     with (
         patch(
             "src.images.imagen_service.MediaRepository",
@@ -619,6 +871,9 @@ def test_process_image_in_background_sync_with_upscale(
         patch(
             "src.images.imagen_service.ImagenService.upscale_image",
         ) as mock_upscale_method,
+        patch(
+            "src.images.imagen_service.gemini_generate_image",
+        ) as mock_gemini_gen,
     ):
         mock_media_repo = AsyncMock()
         mock_media_repo_class.return_value = mock_media_repo
@@ -632,6 +887,11 @@ def test_process_image_in_background_sync_with_upscale(
         mock_gcs = AsyncMock()
         mock_gcs.bucket_name = "test-bucket"
         mock_gcs_class.return_value = mock_gcs
+
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://b/generated.png"
+        mock_result.image.mime_type = MimeTypeEnum.IMAGE_PNG
+        mock_gemini_gen.return_value = (mock_result, None)
 
         # Mock upscale result
         mock_upscale_result = MagicMock()
@@ -706,7 +966,7 @@ def test_process_image_in_background_sync_gemini_image_to_image(
             source_item = MediaItemModel(
                 workspace_id=99,
                 user_email="admin@test.com",
-                model=GenerationModelEnum.IMAGEN_3_001,
+                model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
                 prompt="Source",
                 mime_type=MimeTypeEnum.IMAGE_PNG,
                 aspect_ratio=AspectRatioEnum.RATIO_1_1,
@@ -756,6 +1016,36 @@ def test_gemini_generate_image_base64_reconstruct(mock_gcs_service):
     assert image_obj.image.mime_type == "image/png"
 
     mock_gcs_service.store_to_gcs.assert_called_once()
+
+
+def test_gemini_generate_image_auto_aspect_ratio(mock_gcs_service):
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_candidate = MagicMock()
+    mock_part = MagicMock()
+    mock_part.inline_data.data = "YmFzZTY0X2ltYWdl"
+    mock_part.inline_data.mime_type = "image/png"
+    mock_candidate.content.parts = [mock_part]
+    mock_response.candidates = [mock_candidate]
+    mock_client.models.generate_content.return_value = mock_response
+
+    mock_gcs_service.store_to_gcs.return_value = "gs://bucket/out.png"
+
+    image_obj, grounding_metadata = gemini_generate_image(
+        gcs_service=mock_gcs_service,
+        vertexai_client=mock_client,
+        prompt="Test Auto Ratio",
+        model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE,
+        bucket_name="bucket",
+        aspect_ratio=AspectRatioEnum.AUTO,
+    )
+
+    assert image_obj.image.gcs_uri == "gs://bucket/out.png"
+    # Verify that types.GenerateContentConfig was called with image_config.aspect_ratio == None
+    call_kwargs = mock_client.models.generate_content.call_args.kwargs
+    config = call_kwargs.get("config")
+    assert config is not None
+    assert config.image_config.aspect_ratio is None
 
 
 @patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
@@ -828,8 +1118,10 @@ def test_process_vto_in_background_sync(
 
         mock_sa_repo.get_by_id.side_effect = get_by_id_side_effect
 
-        mock_gcs = AsyncMock()
+        mock_gcs = MagicMock()
         mock_gcs.bucket_name = "test-bucket"
+        mock_gcs.download_bytes_from_gcs.return_value = b"fake_bytes"
+        mock_gcs.store_to_gcs.return_value = "gs://bucket/output_vto.png"
         mock_gcs_class.return_value = mock_gcs
 
         # Call
@@ -919,6 +1211,93 @@ def test_process_upload_upscale_in_background_sync(
         args, kwargs = mock_media_repo.update.call_args
         assert args[0] == 333
         assert args[1]["status"] == JobStatusEnum.COMPLETED
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+def test_process_upload_upscale_in_background_metadata_uses_configured_model(
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.config.config_service import config_service
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+
+    with (
+        patch(
+            "src.images.imagen_service.MediaRepository",
+        ) as mock_media_repo_class,
+        patch(
+            "src.images.imagen_service.SourceAssetRepository",
+        ) as mock_source_asset_repo_class,
+        patch(
+            "src.images.imagen_service.ImagenService",
+        ) as mock_imagen_service_class,
+        patch(
+            "src.images.imagen_service.GcsService",
+        ) as mock_gcs_class,
+        patch(
+            "src.images.imagen_service.IamSignerCredentials",
+        ),
+        patch(
+            "src.images.imagen_service.GeminiService",
+        ) as mock_gemini_service_class,
+    ):
+        mock_media_repo = AsyncMock()
+        mock_media_repo_class.return_value = mock_media_repo
+
+        mock_sa_repo = AsyncMock()
+        mock_source_asset_repo_class.return_value = mock_sa_repo
+
+        mock_imagen_service = AsyncMock()
+        mock_imagen_service_class.return_value = mock_imagen_service
+
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/upscaled.png"
+        mock_imagen_service.upscale_image.return_value = mock_result
+
+        mock_gcs = AsyncMock()
+        mock_gcs_class.return_value = mock_gcs
+
+        existing_asset = MagicMock()
+        existing_asset.id = 301
+        existing_asset.gcs_uri = "gs://bucket/original.png"
+        existing_asset.titles = None
+        existing_asset.descriptions = None
+        existing_asset.original_filename = None
+        mock_sa_repo.get_by_id.return_value = existing_asset
+
+        mock_gemini_service = MagicMock()
+        mock_gemini_service.generate_media_metadata.return_value = {
+            "titles": ["Upscaled Title"],
+            "descriptions": ["Upscaled Description"],
+        }
+        mock_gemini_service_class.return_value = mock_gemini_service
+
+        _process_upload_upscale_in_background(
+            media_item_id=334,
+            workspace_id=1,
+            user=sample_user,
+            gcs_uri="gs://bucket/original.png",
+            file_bytes=None,
+            filename=None,
+            upscale_factor="x4",
+            aspect_ratio=None,
+            source_asset_id=301,
+        )
+
+        mock_gemini_service.generate_media_metadata.assert_called_once()
+        metadata_kwargs = (
+            mock_gemini_service.generate_media_metadata.call_args.kwargs
+        )
+        assert metadata_kwargs["model_name"] == config_service.GEMINI_MODEL_ID
+        assert metadata_kwargs["model_name"] == "gemini-4-argon"
 
 
 @patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
@@ -1068,8 +1447,10 @@ def test_process_vto_in_background_sync_media_item(
         top_asset.gcs_uri = "gs://bucket/garment.png"
         mock_sa_repo.get_by_id.return_value = top_asset
 
-        mock_gcs = AsyncMock()
+        mock_gcs = MagicMock()
         mock_gcs.bucket_name = "test-bucket"
+        mock_gcs.download_bytes_from_gcs.return_value = b"fake_bytes"
+        mock_gcs.store_to_gcs.return_value = "gs://bucket/output_vto.png"
         mock_gcs_class.return_value = mock_gcs
 
         # Call
@@ -1106,18 +1487,11 @@ def test_process_image_in_background_sync_edit_image(
     mock_client = MagicMock()
     mock_genai_init.return_value = mock_client
 
-    # response structure for edit_image
-    mock_response = MagicMock()
-    mock_generated_image = MagicMock()
-    mock_generated_image.image.gcs_uri = "gs://bucket/output_edit.png"
-    mock_response.generated_images = [mock_generated_image]
-    mock_client.models.edit_image.return_value = mock_response
-
     # DTO with reference image
     request_dto = CreateImagenDto(
         workspace_id=1,
         prompt="Add a hat",
-        generation_model=GenerationModelEnum.IMAGEN_3_FAST,
+        generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
         source_asset_ids=[101],
     )
 
@@ -1134,6 +1508,9 @@ def test_process_image_in_background_sync_edit_image(
         patch(
             "src.images.imagen_service.GcsService",
         ) as mock_gcs_class,
+        patch(
+            "src.images.imagen_service.gemini_generate_image",
+        ) as mock_gemini_gen,
     ):
         mock_media_repo = AsyncMock()
         mock_media_repo_class.return_value = mock_media_repo
@@ -1157,6 +1534,11 @@ def test_process_image_in_background_sync_edit_image(
         mock_gcs = AsyncMock()
         mock_gcs.bucket_name = "test-bucket"
         mock_gcs_class.return_value = mock_gcs
+
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_edit.png"
+        mock_result.image.mime_type = MimeTypeEnum.IMAGE_PNG
+        mock_gemini_gen.return_value = (mock_result, None)
 
         # Call the worker
         _process_image_in_background(
@@ -1182,7 +1564,7 @@ def test_create_imagen_dto_validation_failures():
         CreateImagenDto(
             prompt="   ",
             workspace_id=1,
-            generation_model=GenerationModelEnum.IMAGEN_4_ULTRA,
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
         )
     assert "Prompt cannot be empty" in str(exc_info.value)
 
@@ -1191,8 +1573,8 @@ def test_create_imagen_dto_validation_failures():
         CreateImagenDto(
             prompt="Generate image",
             workspace_id=1,
-            generation_model=GenerationModelEnum.IMAGEN_3_FAST,
-            source_asset_ids=[1, 2],
+            generation_model=GenerationModelEnum.GEMINI_2_5_FLASH_IMAGE,
+            source_asset_ids=[1, 2, 3],
         )
     assert "maximum" in str(exc_info.value)
 
@@ -1203,10 +1585,10 @@ def test_create_imagen_dto_validation_failures():
         CreateImagenDto(
             prompt="Generate image",
             workspace_id=1,
-            generation_model=GenerationModelEnum.IMAGEN_4_ULTRA,
+            generation_model=GenerationModelEnum.GEMINI_2_5_FLASH_IMAGE,
             aspect_ratio=AspectRatioEnum.RATIO_1_4,
         )
-    assert "not supported" in str(exc_info.value)
+    assert "is not supported" in str(exc_info.value)
 
     # 4. Invalid generation model for imagen
     with pytest.raises(ValidationError) as exc_info:
@@ -1217,15 +1599,18 @@ def test_create_imagen_dto_validation_failures():
         )
     assert "Invalid generation model" in str(exc_info.value)
 
-    # 5. Unsupported editing model
+    # 5. Simultaneous video reference and YouTube URL
+    from src.common.base_dto import AssetReferenceDto
+
     with pytest.raises(ValidationError) as exc_info:
         CreateImagenDto(
-            prompt="Edit image",
+            prompt="Video to image",
             workspace_id=1,
-            generation_model=GenerationModelEnum.IMAGEN_4_ULTRA,
-            source_asset_ids=[1],
+            generation_model=GenerationModelEnum.GEMINI_3_1_FLASH_IMAGE_PREVIEW,
+            reference_video=AssetReferenceDto(id=10, type="source_asset"),
+            external_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         )
-    assert "does not support image editing" in str(exc_info.value)
+    assert "Cannot provide both" in str(exc_info.value)
 
 
 def test_upscale_imagen_dto_validation_failures():
@@ -1250,6 +1635,20 @@ def test_upscale_imagen_dto_validation_failures():
         )
     assert "Invalid mime type" in str(exc_info.value)
 
+    # 3. Invalid image_preservation_factor (< 0.0)
+    with pytest.raises(ValidationError) as exc_info:
+        UpscaleImagenDto(user_image="base64str", image_preservation_factor=-0.1)
+    assert "image_preservation_factor must be between 0.0 and 1.0" in str(
+        exc_info.value
+    )
+
+    # 4. Invalid image_preservation_factor (> 1.0)
+    with pytest.raises(ValidationError) as exc_info:
+        UpscaleImagenDto(user_image="base64str", image_preservation_factor=1.5)
+    assert "image_preservation_factor must be between 0.0 and 1.0" in str(
+        exc_info.value
+    )
+
 
 def test_vto_dto_validation_failures():
     import pytest
@@ -1270,3 +1669,904 @@ def test_vto_dto_validation_failures():
     with pytest.raises(ValidationError) as exc_info:
         VtoDto(workspace_id=1, person_image=valid_input)
     assert "At least one garment" in str(exc_info.value)
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_video_ref_source_asset(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import AssetReferenceDto, GenerationModelEnum
+    from src.source_assets.schema.source_asset_model import SourceAssetModel
+
+    sample_create_imagen_dto.generation_model = (
+        GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW
+    )
+    sample_create_imagen_dto.reference_video = AssetReferenceDto(
+        id=555, type="source_asset"
+    )
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+
+    with patch(
+        "src.images.imagen_service.gemini_generate_image"
+    ) as mock_gemini_gen:
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_vto_asset.png"
+        mock_gemini_gen.return_value = (mock_result, None)
+
+        with (
+            patch(
+                "src.images.imagen_service.MediaRepository"
+            ) as mock_media_repo_class,
+            patch(
+                "src.images.imagen_service.SourceAssetRepository"
+            ) as mock_sa_repo_class,
+            patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+        ):
+            mock_media_repo = AsyncMock()
+            mock_media_repo_class.return_value = mock_media_repo
+
+            mock_sa_repo = AsyncMock()
+            mock_sa_repo_class.return_value = mock_sa_repo
+            mock_sa_repo.get_by_id.return_value = SourceAssetModel(
+                workspace_id=1,
+                user_id=1,
+                user_email="admin@test.com",
+                original_filename="video.mp4",
+                file_hash="fakehash",
+                mime_type="video/mp4",
+                gcs_uri="gs://b/video.mp4",
+            )
+
+            mock_gcs = AsyncMock()
+            mock_gcs.bucket_name = "test-bucket"
+            mock_gcs_class.return_value = mock_gcs
+
+            _process_image_in_background(
+                media_item_id=200,
+                request_dto=sample_create_imagen_dto,
+                current_user=sample_user,
+            )
+
+            mock_gemini_gen.assert_called_once()
+            mock_media_repo.update.assert_called_once()
+            call_kwargs = mock_media_repo.update.call_args[0][1]
+            assert call_kwargs["source_assets"][0]["asset_id"] == 555
+            assert call_kwargs["source_assets"][0]["role"] == "video_reference"
+
+
+def test_create_imagen_dto_flash_lite_accepts_video_references():
+    from pydantic import ValidationError
+
+    from src.common.base_dto import AssetReferenceDto, GenerationModelEnum
+    from src.images.dto.create_imagen_dto import CreateImagenDto
+
+    lite_model = GenerationModelEnum.GEMINI_3_1_FLASH_LITE_IMAGE
+    video_reference = AssetReferenceDto(id=10, type="source_asset")
+    youtube_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    file_dto = CreateImagenDto(
+        prompt="Video to image",
+        workspace_id=1,
+        generation_model=lite_model,
+        reference_video=video_reference,
+    )
+    assert file_dto.generation_model == lite_model
+    assert file_dto.reference_video == video_reference
+
+    youtube_dto = CreateImagenDto(
+        prompt="Video to image",
+        workspace_id=1,
+        generation_model=lite_model,
+        external_url=youtube_url,
+    )
+    assert youtube_dto.external_url == youtube_url
+
+    with pytest.raises(ValidationError) as exc_info:
+        CreateImagenDto(
+            prompt="Video to image",
+            workspace_id=1,
+            generation_model=lite_model,
+            reference_video=video_reference,
+            resolution="2K",
+        )
+    assert "only supports 1K resolution" in str(exc_info.value)
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_flash_lite_forwards_video_reference(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import AssetReferenceDto, GenerationModelEnum
+    from src.source_assets.schema.source_asset_model import SourceAssetModel
+
+    lite_model = GenerationModelEnum.GEMINI_3_1_FLASH_LITE_IMAGE
+    video_gcs_uri = "gs://b/lite_video.mp4"
+    sample_create_imagen_dto.generation_model = lite_model
+    sample_create_imagen_dto.resolution = "1K"
+    sample_create_imagen_dto.reference_video = AssetReferenceDto(
+        id=777, type="source_asset"
+    )
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+    mock_genai_init.return_value = MagicMock()
+
+    with (
+        patch(
+            "src.images.imagen_service.gemini_generate_image"
+        ) as mock_gemini_gen,
+        patch(
+            "src.images.imagen_service.MediaRepository"
+        ) as mock_media_repo_class,
+        patch(
+            "src.images.imagen_service.SourceAssetRepository"
+        ) as mock_sa_repo_class,
+        patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+    ):
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_lite.png"
+        mock_gemini_gen.return_value = (mock_result, None)
+
+        mock_media_repo = AsyncMock()
+        mock_media_repo_class.return_value = mock_media_repo
+
+        mock_sa_repo = AsyncMock()
+        mock_sa_repo_class.return_value = mock_sa_repo
+        mock_sa_repo.get_by_id.return_value = SourceAssetModel(
+            workspace_id=1,
+            user_id=1,
+            user_email="admin@test.com",
+            original_filename="lite_video.mp4",
+            file_hash="fakehash",
+            mime_type="video/mp4",
+            gcs_uri=video_gcs_uri,
+        )
+
+        mock_gcs = AsyncMock()
+        mock_gcs.bucket_name = "test-bucket"
+        mock_gcs_class.return_value = mock_gcs
+
+        _process_image_in_background(
+            media_item_id=201,
+            request_dto=sample_create_imagen_dto,
+            current_user=sample_user,
+        )
+
+        mock_gemini_gen.assert_called_once()
+        gen_kwargs = mock_gemini_gen.call_args.kwargs
+        assert gen_kwargs["model"] == lite_model
+        reference_parts = gen_kwargs["reference_parts"]
+        assert len(reference_parts) == 1
+        assert reference_parts[0].file_data.file_uri == video_gcs_uri
+
+        mock_media_repo.update.assert_called_once()
+        linked_asset = mock_media_repo.update.call_args[0][1]["source_assets"][
+            0
+        ]
+        assert linked_asset["asset_id"] == 777
+        assert linked_asset["role"] == "video_reference"
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_video_ref_media_item(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import (
+        AssetReferenceDto,
+        GenerationModelEnum,
+        MimeTypeEnum,
+    )
+
+    sample_create_imagen_dto.generation_model = (
+        GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW
+    )
+    sample_create_imagen_dto.reference_video = AssetReferenceDto(
+        id=666, type="media_item", index=0
+    )
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+
+    with patch(
+        "src.images.imagen_service.gemini_generate_image"
+    ) as mock_gemini_gen:
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_vto_mi.png"
+        mock_gemini_gen.return_value = (mock_result, None)
+
+        with (
+            patch(
+                "src.images.imagen_service.MediaRepository"
+            ) as mock_media_repo_class,
+            patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+        ):
+            mock_media_repo = AsyncMock()
+            mock_media_repo_class.return_value = mock_media_repo
+            mock_media_repo.get_by_id.return_value = MediaItemModel(
+                workspace_id=1,
+                user_email="admin@test.com",
+                model=GenerationModelEnum.VEO_3_QUALITY,
+                prompt="Video",
+                mime_type=MimeTypeEnum.VIDEO_MP4,
+                aspect_ratio=AspectRatioEnum.RATIO_16_9,
+                gcs_uris=["gs://b/video.mp4"],
+            )
+
+            mock_gcs = AsyncMock()
+            mock_gcs.bucket_name = "test-bucket"
+            mock_gcs_class.return_value = mock_gcs
+
+            _process_image_in_background(
+                media_item_id=201,
+                request_dto=sample_create_imagen_dto,
+                current_user=sample_user,
+            )
+
+            mock_gemini_gen.assert_called_once()
+            mock_media_repo.update.assert_called_once()
+            call_kwargs = mock_media_repo.update.call_args[0][1]
+            assert call_kwargs["source_media_items"][0]["media_item_id"] == 666
+            assert (
+                call_kwargs["source_media_items"][0]["role"]
+                == "video_reference"
+            )
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_video_ref_youtube_url(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import GenerationModelEnum
+
+    sample_create_imagen_dto.generation_model = (
+        GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW
+    )
+    sample_create_imagen_dto.external_url = (
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    )
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+
+    with patch(
+        "src.images.imagen_service.gemini_generate_image"
+    ) as mock_gemini_gen:
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_vto_yt.png"
+        mock_gemini_gen.return_value = (mock_result, None)
+
+        with (
+            patch(
+                "src.images.imagen_service.MediaRepository"
+            ) as mock_media_repo_class,
+            patch(
+                "src.images.imagen_service.SourceAssetRepository"
+            ) as mock_source_asset_repo_class,
+            patch(
+                "src.images.imagen_service.UserRepository"
+            ) as mock_user_repo_class,
+            patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+        ):
+            mock_media_repo = AsyncMock()
+            mock_media_repo_class.return_value = mock_media_repo
+            mock_media_item = MagicMock()
+            mock_media_item.user_id = 1
+            mock_media_item.workspace_id = 1
+            mock_media_item.user_email = "test@example.com"
+            mock_media_repo.get_by_id.return_value = mock_media_item
+
+            mock_source_asset_repo = AsyncMock()
+            mock_source_asset_repo_class.return_value = mock_source_asset_repo
+            mock_source_asset_repo.find_by_external_url.return_value = None
+            mock_source_asset_repo.create.return_value = MagicMock(id=987)
+
+            mock_user_repo = AsyncMock()
+            mock_user_repo_class.return_value = mock_user_repo
+            mock_user_repo.get_by_email.return_value = sample_user
+
+            mock_gcs = AsyncMock()
+            mock_gcs.bucket_name = "test-bucket"
+            mock_gcs_class.return_value = mock_gcs
+
+            _process_image_in_background(
+                media_item_id=202,
+                request_dto=sample_create_imagen_dto,
+                current_user=sample_user,
+            )
+
+            mock_gemini_gen.assert_called_once()
+            mock_media_repo.update.assert_called_once()
+
+
+def test_create_imagen_dto_youtube_url_validator():
+    from src.common.base_dto import GenerationModelEnum
+    from src.images.dto.create_imagen_dto import CreateImagenDto
+    from pydantic import ValidationError
+
+    # Valid youtube URL
+    dto = CreateImagenDto(
+        workspace_id=1,
+        prompt="test",
+        generation_model=GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW,
+        external_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    )
+    assert dto.external_url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    # Invalid URL domain
+    with pytest.raises(ValidationError):
+        CreateImagenDto(
+            workspace_id=1,
+            prompt="test",
+            generation_model=GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW,
+            external_url="https://www.google.com",
+        )
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_video_ref_media_item_out_of_bounds(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import (
+        AssetReferenceDto,
+        AspectRatioEnum,
+        GenerationModelEnum,
+        MimeTypeEnum,
+    )
+    from src.common.schema.media_item_model import MediaItemModel
+
+    sample_create_imagen_dto.generation_model = (
+        GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW
+    )
+    sample_create_imagen_dto.reference_video = AssetReferenceDto(
+        id=666, type="media_item", index=5
+    )
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+
+    with patch(
+        "src.images.imagen_service.gemini_generate_image"
+    ) as mock_gemini_gen:
+        with patch(
+            "src.images.imagen_service.MediaRepository"
+        ) as mock_media_repo_class:
+            mock_media_repo = AsyncMock()
+            mock_media_repo_class.return_value = mock_media_repo
+            mock_media_repo.get_by_id.return_value = MediaItemModel(
+                workspace_id=1,
+                user_email="admin@test.com",
+                model=GenerationModelEnum.VEO_3_QUALITY,
+                prompt="Video",
+                mime_type=MimeTypeEnum.VIDEO_MP4,
+                aspect_ratio=AspectRatioEnum.RATIO_16_9,
+                gcs_uris=["gs://b/video.mp4"],
+            )
+
+            _process_image_in_background(
+                media_item_id=203,
+                request_dto=sample_create_imagen_dto,
+                current_user=sample_user,
+            )
+
+            mock_media_repo.get_by_id.assert_called_once_with(666)
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_no_images_generated(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import GenerationModelEnum
+    from src.common.schema.media_item_model import JobStatusEnum
+
+    sample_create_imagen_dto.generation_model = (
+        GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW
+    )
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+
+    with patch(
+        "src.images.imagen_service.gemini_generate_image"
+    ) as mock_gemini_gen:
+        mock_gemini_gen.return_value = (None, None)
+        with (
+            patch(
+                "src.images.imagen_service.MediaRepository"
+            ) as mock_media_repo_class,
+            patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+        ):
+            mock_media_repo = AsyncMock()
+            mock_media_repo_class.return_value = mock_media_repo
+
+            mock_gcs = AsyncMock()
+            mock_gcs.bucket_name = "test-bucket"
+            mock_gcs_class.return_value = mock_gcs
+
+            _process_image_in_background(
+                media_item_id=204,
+                request_dto=sample_create_imagen_dto,
+                current_user=sample_user,
+            )
+
+            mock_media_repo.update.assert_called_once()
+            call_kwargs = mock_media_repo.update.call_args[0][1]
+            assert call_kwargs["status"] == JobStatusEnum.FAILED
+            assert call_kwargs["error_message"] == "No images generated"
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_imagen_text_to_image(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import GenerationModelEnum
+
+    sample_create_imagen_dto.generation_model = GenerationModelEnum.IMAGEN_4_001
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+    mock_response = MagicMock()
+    mock_gen_img = MagicMock()
+    mock_gen_img.image.gcs_uri = "gs://b/out.png"
+    mock_response.generated_images = [mock_gen_img]
+    mock_client.models.generate_images.return_value = mock_response
+
+    with (
+        patch(
+            "src.images.imagen_service.MediaRepository"
+        ) as mock_media_repo_class,
+        patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+    ):
+        mock_media_repo = AsyncMock()
+        mock_media_repo_class.return_value = mock_media_repo
+        mock_gcs = AsyncMock()
+        mock_gcs.bucket_name = "test-bucket"
+        mock_gcs_class.return_value = mock_gcs
+
+        _process_image_in_background(
+            media_item_id=205,
+            request_dto=sample_create_imagen_dto,
+            current_user=sample_user,
+        )
+        assert mock_client.models.generate_images.called
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_imagen_edit_image(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import GenerationModelEnum
+    from src.source_assets.schema.source_asset_model import SourceAssetModel
+
+    sample_create_imagen_dto.generation_model = GenerationModelEnum.IMAGEN_4_001
+    sample_create_imagen_dto.source_asset_ids = [10]
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+    mock_response = MagicMock()
+    mock_gen_img = MagicMock()
+    mock_gen_img.image.gcs_uri = "gs://b/out_edit.png"
+    mock_response.generated_images = [mock_gen_img]
+    mock_client.models.edit_image.return_value = mock_response
+
+    with (
+        patch(
+            "src.images.imagen_service.MediaRepository"
+        ) as mock_media_repo_class,
+        patch(
+            "src.images.imagen_service.SourceAssetRepository"
+        ) as mock_sa_repo_class,
+        patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+    ):
+        mock_media_repo = AsyncMock()
+        mock_media_repo_class.return_value = mock_media_repo
+        mock_sa_repo = AsyncMock()
+        mock_sa_repo_class.return_value = mock_sa_repo
+        mock_sa_repo.get_by_id.return_value = SourceAssetModel(
+            workspace_id=1,
+            user_id=1,
+            user_email="admin@test.com",
+            original_filename="img.png",
+            file_hash="hash",
+            mime_type="image/png",
+            gcs_uri="gs://b/img.png",
+        )
+        mock_gcs = AsyncMock()
+        mock_gcs.bucket_name = "test-bucket"
+        mock_gcs_class.return_value = mock_gcs
+
+        _process_image_in_background(
+            media_item_id=206,
+            request_dto=sample_create_imagen_dto,
+            current_user=sample_user,
+        )
+        assert mock_client.models.edit_image.called
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_with_metadata_generation(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    sample_create_imagen_dto.metadata_generation_model = "gemini-3.5-flash"
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+
+    with (
+        patch(
+            "src.images.imagen_service.MediaRepository",
+        ) as mock_media_repo_class,
+        patch(
+            "src.images.imagen_service.GeminiService",
+        ) as mock_gemini_service_class,
+        patch(
+            "src.images.imagen_service.GcsService",
+        ) as mock_gcs_class,
+        patch(
+            "src.images.imagen_service.gemini_generate_image",
+        ) as mock_gemini_gen,
+    ):
+        mock_media_repo = AsyncMock()
+        mock_media_repo_class.return_value = mock_media_repo
+
+        mock_gemini_service = MagicMock()
+        mock_gemini_service.enhance_prompt_from_dto = AsyncMock(
+            return_value="Enhanced Prompt"
+        )
+        mock_gemini_service.generate_media_metadata.return_value = {
+            "titles": ["Generated Image Title"],
+            "descriptions": ["Generated Image Description"],
+        }
+        mock_gemini_service_class.return_value = mock_gemini_service
+
+        mock_gcs = AsyncMock()
+        mock_gcs.bucket_name = "test-bucket"
+        mock_gcs_class.return_value = mock_gcs
+
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_0.png"
+        mock_result.image.mime_type = MimeTypeEnum.IMAGE_PNG
+        mock_gemini_gen.return_value = (mock_result, None)
+
+        _process_image_in_background(
+            media_item_id=123,
+            request_dto=sample_create_imagen_dto,
+            current_user=sample_user,
+        )
+
+        mock_media_repo.update.assert_called_once()
+        args, kwargs = mock_media_repo.update.call_args
+        assert args[0] == 123
+        update_data = args[1]
+        assert update_data["status"] == JobStatusEnum.COMPLETED
+        assert update_data["titles"] == ["Generated Image Title"]
+        assert update_data["descriptions"] == ["Generated Image Description"]
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_video_ref_source_asset_youtube_resolved(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import (
+        AssetReferenceDto,
+        GenerationModelEnum,
+    )
+    from src.source_assets.schema.source_asset_model import (
+        SourceAssetModel,
+        AssetTypeEnum,
+        AssetScopeEnum,
+    )
+    from src.common.base_dto import MimeTypeEnum
+
+    sample_create_imagen_dto.generation_model = (
+        GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW
+    )
+    sample_create_imagen_dto.reference_video = AssetReferenceDto(
+        id=50, type="source_asset"
+    )
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+
+    with patch(
+        "src.images.imagen_service.gemini_generate_image"
+    ) as mock_gemini_gen:
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_yt.png"
+        mock_gemini_gen.return_value = (mock_result, None)
+
+        with (
+            patch(
+                "src.images.imagen_service.MediaRepository"
+            ) as mock_media_repo_class,
+            patch(
+                "src.images.imagen_service.SourceAssetRepository"
+            ) as mock_source_asset_repo_class,
+            patch(
+                "src.images.imagen_service.UserRepository"
+            ) as mock_user_repo_class,
+            patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+        ):
+            mock_media_repo = AsyncMock()
+            mock_media_repo_class.return_value = mock_media_repo
+            mock_media_item = MagicMock()
+            mock_media_item.user_id = 1
+            mock_media_item.workspace_id = 1
+            mock_media_item.user_email = "test@example.com"
+            mock_media_repo.get_by_id.return_value = mock_media_item
+
+            mock_source_asset_repo = AsyncMock()
+            mock_source_asset_repo_class.return_value = mock_source_asset_repo
+
+            # YouTube SourceAsset mock
+            youtube_source_asset = SourceAssetModel(
+                id=50,
+                workspace_id=1,
+                user_id=1,
+                gcs_uri=None,
+                original_filename="YouTube Video",
+                mime_type=MimeTypeEnum.VIDEO_MP4,
+                aspect_ratio="16:9",
+                file_hash=None,
+                scope=AssetScopeEnum.PRIVATE,
+                asset_type=AssetTypeEnum.YOUTUBE_VIDEO,
+                external_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            )
+            mock_source_asset_repo.get_by_id.return_value = youtube_source_asset
+
+            mock_user_repo = AsyncMock()
+            mock_user_repo_class.return_value = mock_user_repo
+            mock_user_repo.get_by_email.return_value = sample_user
+
+            mock_gcs = AsyncMock()
+            mock_gcs.bucket_name = "test-bucket"
+            mock_gcs_class.return_value = mock_gcs
+
+            _process_image_in_background(
+                media_item_id=202,
+                request_dto=sample_create_imagen_dto,
+                current_user=sample_user,
+            )
+
+            mock_gemini_gen.assert_called_once()
+            args, kwargs = mock_gemini_gen.call_args
+            reference_parts = kwargs.get("reference_parts")
+            assert reference_parts is not None
+            assert len(reference_parts) == 1
+            assert (
+                reference_parts[0].file_data.file_uri
+                == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            )
+
+
+@patch("src.images.imagen_service.generate_image_thumbnail_from_gcs")
+@patch("src.common.media_utils.generate_image_thumbnail_from_gcs")
+@patch("src.database.WorkerDatabase")
+@patch("src.images.imagen_service.GenAIModelSetup.init")
+def test_process_image_in_background_sync_video_ref_media_item_youtube_resolved(
+    mock_genai_init,
+    mock_worker_db_class,
+    mock_thumb_mu,
+    mock_thumb_is,
+    sample_create_imagen_dto,
+    sample_user,
+):
+    _ = (mock_thumb_mu, mock_thumb_is)
+    from src.common.base_dto import (
+        AssetReferenceDto,
+        GenerationModelEnum,
+    )
+    from src.common.schema.media_item_model import MediaItemModel
+    from src.common.base_dto import MimeTypeEnum
+
+    sample_create_imagen_dto.generation_model = (
+        GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW
+    )
+    sample_create_imagen_dto.reference_video = AssetReferenceDto(
+        id=60, type="media_item", index=0
+    )
+
+    mock_db_context = AsyncMock()
+    mock_db_factory = MagicMock(return_value=mock_db_context)
+    mock_worker_db_class.return_value.__aenter__.return_value = mock_db_factory
+    mock_client = MagicMock()
+    mock_genai_init.return_value = mock_client
+
+    with patch(
+        "src.images.imagen_service.gemini_generate_image"
+    ) as mock_gemini_gen:
+        mock_result = MagicMock()
+        mock_result.image.gcs_uri = "gs://bucket/output_yt_media.png"
+        mock_gemini_gen.return_value = (mock_result, None)
+
+        with (
+            patch(
+                "src.images.imagen_service.MediaRepository"
+            ) as mock_media_repo_class,
+            patch(
+                "src.images.imagen_service.SourceAssetRepository"
+            ) as mock_source_asset_repo_class,
+            patch(
+                "src.images.imagen_service.UserRepository"
+            ) as mock_user_repo_class,
+            patch("src.images.imagen_service.GcsService") as mock_gcs_class,
+        ):
+            mock_media_repo = AsyncMock()
+            mock_media_repo_class.return_value = mock_media_repo
+
+            # Mocking get_by_id to return:
+            # - When fetching the placeholder media item (id=202): returns placeholder_item
+            # - When fetching the reference media item (id=60): returns a youtube reference media item
+            placeholder_item = MagicMock()
+            placeholder_item.user_id = 1
+            placeholder_item.workspace_id = 1
+            placeholder_item.user_email = "test@example.com"
+
+            youtube_media_item = MediaItemModel(
+                workspace_id=1,
+                user_email="test@example.com",
+                model=GenerationModelEnum.GEMINI_3_PRO_IMAGE_PREVIEW,
+                prompt="YouTube video in media item",
+                mime_type=MimeTypeEnum.VIDEO_MP4,
+                aspect_ratio="16:9",
+                gcs_uris=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+            )
+
+            def get_by_id_side_effect(item_id):
+                if item_id == 202:
+                    return placeholder_item
+                if item_id == 60:
+                    return youtube_media_item
+                return None
+
+            mock_media_repo.get_by_id.side_effect = get_by_id_side_effect
+
+            mock_source_asset_repo = AsyncMock()
+            mock_source_asset_repo_class.return_value = mock_source_asset_repo
+
+            mock_user_repo = AsyncMock()
+            mock_user_repo_class.return_value = mock_user_repo
+            mock_user_repo.get_by_email.return_value = sample_user
+
+            mock_gcs = AsyncMock()
+            mock_gcs.bucket_name = "test-bucket"
+            mock_gcs_class.return_value = mock_gcs
+
+            _process_image_in_background(
+                media_item_id=202,
+                request_dto=sample_create_imagen_dto,
+                current_user=sample_user,
+            )
+
+            mock_gemini_gen.assert_called_once()
+            args, kwargs = mock_gemini_gen.call_args
+            reference_parts = kwargs.get("reference_parts")
+            assert reference_parts is not None
+            assert len(reference_parts) == 1
+            assert (
+                reference_parts[0].file_data.file_uri
+                == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            )

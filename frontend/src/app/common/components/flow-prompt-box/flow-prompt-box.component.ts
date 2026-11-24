@@ -21,18 +21,34 @@ import {
   Output,
   signal,
   HostListener,
-  SimpleChanges,
   ViewChild,
   ElementRef,
+  computed,
+  OnInit,
+  OnDestroy,
+  inject,
+  OnChanges,
+  SimpleChanges,
 } from '@angular/core';
-import {VeoRequest} from '../../models/search.model';
-import {GenerationModelConfig} from '../../config/model-config';
-import {MatIcon, MatIconModule} from '@angular/material/icon';
+import {MatSnackBar} from '@angular/material/snack-bar';
+import {ReferenceImage, ReferenceVideo} from '../../models/search.model';
+import {
+  GenerationModelConfig,
+  getSupportedModelDurations,
+  isGeminiOmniModel,
+} from '../../config/model-config';
+import {MatIconModule} from '@angular/material/icon';
 import {CommonModule} from '@angular/common';
 import {FormsModule} from '@angular/forms';
 import {MatButtonModule} from '@angular/material/button';
 import {MatMenuModule} from '@angular/material/menu';
 import {MatTooltipModule} from '@angular/material/tooltip';
+import {
+  extractYouTubeVideoId,
+  getYouTubeThumbnailUrl,
+} from '../../../utils/youtube.utils';
+
+export type NumPos = 1 | 2;
 
 @Component({
   standalone: true,
@@ -48,15 +64,14 @@ import {MatTooltipModule} from '@angular/material/tooltip';
     MatTooltipModule,
   ],
 })
-export class FlowPromptBoxComponent {
+export class FlowPromptBoxComponent implements OnInit, OnChanges, OnDestroy {
+  private snackBar = inject(MatSnackBar);
+
   @Input() searchRequest!: any; // Keep for now, but prefer individual inputs
-  @Input() generationModels: GenerationModelConfig[] = [];
   @Input() isLoading = false;
-  @Input() selectedGenerationModel = '';
   @Input() prompt = '';
   @Input() aspectRatio = '16:9';
-  @Input() outputs = 4;
-  @Input() mode = 'Text to Video';
+  @Input() outputs = 1;
   @Input() aspectRatioOptions: {
     value: string;
     viewValue: string;
@@ -65,32 +80,111 @@ export class FlowPromptBoxComponent {
   }[] = [];
   @Input() modes: {value: string; icon: string; label: string}[] = [];
 
+  // --- setter inputs ---
+  private _generationModels: GenerationModelConfig[] = [];
+  private generationModelsSignal = signal<GenerationModelConfig[]>([]);
+  @Input() set generationModels(val: GenerationModelConfig[]) {
+    this._generationModels = val || [];
+    this.generationModelsSignal.set(val || []);
+    this.updateSupportedResolutions();
+  }
+  get generationModels(): GenerationModelConfig[] {
+    return this._generationModels;
+  }
+  private _selectedGenerationModel = '';
+  private selectedGenerationModelSignal = signal<string>('');
+  @Input() set selectedGenerationModel(val: string) {
+    this._selectedGenerationModel = val;
+    this.selectedGenerationModelSignal.set(val);
+    this.updateSupportedResolutions();
+  }
+  get selectedGenerationModel(): string {
+    return this._selectedGenerationModel;
+  }
+
+  @Input() set mode(val: string) {
+    if (val) {
+      const oldMode = this.selectedMode();
+      this.selectedMode.set(val);
+      this.updateSupportedResolutions(
+        undefined,
+        oldMode !== '' && oldMode !== val,
+      );
+    }
+  }
+  get mode(): string {
+    return this.selectedMode();
+  }
+
+  @Input() set resolution(val: '1K' | '2K' | '4K' | undefined) {
+    if (val) {
+      this.selectedResolution.set(val);
+    }
+  }
+  @Input() set duration(val: number | undefined) {
+    if (val) {
+      this.selectedDuration.set(val);
+    }
+  }
+
+  // --- outputs ---
   @Output() generateClicked = new EventEmitter<void>();
   @Output() rewriteClicked = new EventEmitter<void>();
   @Output() modelSelected = new EventEmitter<any>();
   @Output() promptChanged = new EventEmitter<string>();
+  @Output() resolutionChanged = new EventEmitter<'1K' | '2K' | '4K'>();
+  @Output() durationChanged = new EventEmitter<number>();
   @Output() aspectRatioChanged = new EventEmitter<string>();
   @Output() outputsChanged = new EventEmitter<number>();
   @Output() modeChanged = new EventEmitter<string>();
-  @Output() openImageSelector = new EventEmitter<1 | 2>();
-  @Output() clearImage = new EventEmitter<{num: 1 | 2; event: Event}>();
+  @Output() openImageSelector = new EventEmitter<NumPos>();
+  @Output() editImage = new EventEmitter<{num: NumPos}>();
+  @Output() clearImage = new EventEmitter<{num: NumPos; event: Event}>();
   @Output() openImageSelectorForReference = new EventEmitter<void>();
   @Output() onReferenceImageDrop = new EventEmitter<DragEvent>();
+  @Output() editReferenceImage = new EventEmitter<{
+    index: number;
+    ref: ReferenceImage;
+  }>();
   @Output() clearReferenceImage = new EventEmitter<{
     index: number;
     event: Event;
   }>();
   @Output() toggleReferenceImagesType = new EventEmitter<boolean>();
+  @Output() openVideoSelectorForReference = new EventEmitter<void>();
+  @Output() onReferenceVideoDrop = new EventEmitter<DragEvent>();
+  @Output() clearReferenceVideo = new EventEmitter<Event>();
+  @Output() clearReferenceVideoItem = new EventEmitter<{
+    index: number;
+    event: Event;
+  }>();
+  @Output() openVideoUrlInputForReference = new EventEmitter<void>();
+  @Output() clearExternalUrl = new EventEmitter<void>();
 
   @Input() image1Preview: string | null = null;
   @Input() image2Preview: string | null = null;
-  @Input() referenceImages: any[] = [];
+  @Input() referenceImages: ReferenceImage[] = [];
   @Input() referenceImagesType: 'ASSET' | 'STYLE' = 'ASSET';
+  @Input() referenceVideo: any | null = null;
+  @Input() referenceVideos: ReferenceVideo[] = [];
+  private _externalUrl: string | null = null;
+  private externalUrlSignal = signal<string | null>(null);
+  @Input() set externalUrl(val: string | null) {
+    this._externalUrl = val;
+    this.externalUrlSignal.set(val);
+  }
+  get externalUrl(): string | null {
+    return this._externalUrl;
+  }
 
   @ViewChild('modeTrigger') modeTrigger!: ElementRef;
   @ViewChild('modeMenu') modeMenu!: ElementRef;
   @ViewChild('settingsTrigger') settingsTrigger!: ElementRef;
   @ViewChild('settingsMenu') settingsMenu!: ElementRef;
+
+  private resolutionTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private durationTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private hasInitialized = false;
 
   constructor(private eRef: ElementRef) {}
 
@@ -118,6 +212,9 @@ export class FlowPromptBoxComponent {
     }
   }
 
+  // All possible resolutions
+  readonly ALL_RESOLUTIONS: ('1K' | '2K' | '4K')[] = ['1K', '2K', '4K'];
+
   // --- Logic moved from VideoComponent ---
 
   promptText = signal<string>('');
@@ -125,15 +222,102 @@ export class FlowPromptBoxComponent {
   // Menu open/close states
   isModeMenuOpen = signal<boolean>(false);
   isSettingsMenuOpen = signal<boolean>(false);
-  isSettingsDropdownOpen = signal<'aspect' | 'outputs' | 'model' | null>(null);
+  isSettingsDropdownOpen = signal<
+    'aspect' | 'outputs' | 'model' | 'resolution' | 'duration' | null
+  >(null);
   selectedMode = signal<string>('Text to Video');
   selectedPreset = signal<string>('');
+  selectedResolution = signal<'1K' | '2K' | '4K'>('1K');
+  selectedDuration = signal<number>(4);
+
+  supportedResolutions = signal<('1K' | '2K' | '4K')[]>([]);
+
+  // --- Computed Values ---
+  isExtendVideo = computed(() => this.selectedMode() === 'Extend Video');
+  isConcatenateVideo = computed(
+    () => this.selectedMode() === 'Concatenate Video',
+  );
+  isFramesToVideo = computed(() => this.selectedMode() === 'Frames to Video');
+  isIngredientsToVideo = computed(
+    () => this.selectedMode() === 'Ingredients to Video',
+  );
+  isIngredientsToImage = computed(
+    () => this.selectedMode() === 'Ingredients to Image',
+  );
+  isTextToVideo = computed(() => this.selectedMode() === 'Text to Video');
+  isVideoToImage = computed(() => this.selectedMode() === 'Video to Image');
+  isImageMode = computed(() => this.selectedMode().includes('Image'));
+  canEditImgSlot = computed(
+    () => !this.isExtendVideo() && !this.isConcatenateVideo(),
+  );
+  hasResolutionOptions = computed(() => this.supportedResolutions().length > 0);
+  hasDurationOptions = computed(
+    () =>
+      (this.getSelectedModelObject()?.capabilities?.supportedDurations ?? [])
+        .length > 0,
+  );
+
+  youtubeVideoId = computed(() =>
+    extractYouTubeVideoId(this.externalUrlSignal()),
+  );
+
+  youtubeThumbnailUrl = computed(() =>
+    getYouTubeThumbnailUrl(this.youtubeVideoId()),
+  );
+
+  // --- Lifecycle Hooks ---
+  ngOnInit(): void {
+    this.updateSupportedResolutions();
+    this.syncSelectedDuration(true);
+    this.hasInitialized = true;
+  }
+
+  ngOnChanges(changes: SimpleChanges): void {
+    const relevantKeys = [
+      'mode',
+      'selectedGenerationModel',
+      'resolution',
+      'duration',
+      'image1Preview',
+      'image2Preview',
+    ];
+    const changedRelevant = relevantKeys.filter(key => key in changes);
+    if (changedRelevant.length === 0) {
+      return;
+    }
+
+    if ('selectedGenerationModel' in changes || 'mode' in changes) {
+      this.updateSupportedResolutions();
+    }
+
+    const isInitialChange =
+      !this.hasInitialized ||
+      changedRelevant.some(key => changes[key].isFirstChange());
+    this.syncSelectedDuration(isInitialChange);
+  }
+
+  ngOnDestroy(): void {
+    if (this.resolutionTimeoutId) {
+      clearTimeout(this.resolutionTimeoutId);
+    }
+    if (this.durationTimeoutId) {
+      clearTimeout(this.durationTimeoutId);
+    }
+  }
 
   // --- Event Handlers ---
 
   onPromptInput(event: Event) {
     const target = event.target as HTMLTextAreaElement;
     this.promptChanged.emit(target.value);
+  }
+
+  onEditOverlayClick(num?: NumPos, index?: number, ref?: ReferenceImage): void {
+    if (num) {
+      this.editImage.emit({num});
+    } else if (index !== undefined && ref) {
+      this.editReferenceImage.emit({index, ref});
+    }
   }
 
   // --- Menu Toggles ---
@@ -152,38 +336,208 @@ export class FlowPromptBoxComponent {
   // --- Select Handlers ---
 
   selectMode(mode: string) {
+    const oldMode = this.selectedMode();
     this.selectedMode.set(mode);
     this.modeChanged.emit(mode);
     this.isModeMenuOpen.set(false);
-    console.log('Selected Mode:', mode);
+
+    // Call the centralized update method and explicitly pass modeChanged=true
+    this.updateSupportedResolutions(
+      undefined,
+      oldMode !== '' && oldMode !== mode,
+    );
+
+    this.syncSelectedDuration(oldMode === mode);
+  }
+
+  selectResolution(resolution: '1K' | '2K' | '4K', model?: any) {
+    if (!this.supportedResolutions().includes(resolution)) return;
+
+    this.selectedResolution.set(resolution);
+    this.resolutionChanged.emit(resolution);
+    this.isSettingsDropdownOpen.set(null);
+
+    if (resolution !== '1K') {
+      const longest = this.getSelectedModelDurations(model).at(-1);
+      if (longest) this.selectDuration(longest);
+    }
+  }
+
+  selectDuration(duration: number) {
+    this.selectedDuration.set(duration);
+    this.durationChanged.emit(duration);
+    this.isSettingsDropdownOpen.set(null);
   }
 
   selectNewAspectRatio(ratio: string) {
     this.aspectRatioChanged.emit(ratio);
     this.isSettingsDropdownOpen.set(null);
-    console.log('Selected Aspect Ratio:', ratio);
+  }
+
+  getAspectRatioIcon(aspectRatio: string): string {
+    if (!aspectRatio) return 'crop_landscape';
+    const matched = this.aspectRatioOptions?.find(
+      o => o.viewValue === aspectRatio || o.value === aspectRatio,
+    );
+    if (matched && matched.icon) {
+      return matched.icon;
+    }
+    const lowerRatio = aspectRatio.toLowerCase();
+    if (lowerRatio.includes('auto')) {
+      return 'hdr_auto';
+    }
+    if (lowerRatio.includes('1:1') || lowerRatio.includes('square')) {
+      return 'crop_square';
+    }
+    return aspectRatio.includes('16:9') ? 'crop_landscape' : 'crop_portrait';
   }
 
   selectOutputs(count: number) {
     this.outputsChanged.emit(count);
     this.isSettingsDropdownOpen.set(null);
-    console.log('Selected Outputs:', count);
   }
 
   // Triggered from internal dropdown
   selectInternalModel(model: any) {
+    if (this.isVideoToImage() && !model?.capabilities?.supportsVideoReference) {
+      return;
+    }
     this.isSettingsDropdownOpen.set(null);
     this.modelSelected.emit(model);
+
+    this.updateSupportedResolutions(model);
+    this.syncSelectedDuration(false, model);
   }
 
   selectPreset(preset: string) {
     this.selectedPreset.set(preset);
-    console.log('Selected Preset:', preset);
   }
 
   getSelectedModelObject(): GenerationModelConfig | undefined {
-    return this.generationModels.find(
-      m => m.viewValue === this.selectedGenerationModel,
+    return this.generationModelsSignal().find(
+      m => m.viewValue === this.selectedGenerationModelSignal(),
     );
+  }
+
+  isOmniModel(model?: any): boolean {
+    const activeModel = model || this.getSelectedModelObject();
+    return isGeminiOmniModel(activeModel?.value || activeModel?.viewValue);
+  }
+
+  getSelectedModelResolutions(model?: any): ('1K' | '2K' | '4K')[] {
+    const activeModel = model || this.getSelectedModelObject();
+    if (this.isExtendVideo()) {
+      const smallest = activeModel?.capabilities?.supportedResolutions?.[0];
+      return smallest ? [smallest] : [];
+    }
+    return activeModel?.capabilities?.supportedResolutions ?? [];
+  }
+
+  getSelectedModelDurations(model?: any): number[] {
+    const activeModel = model || this.getSelectedModelObject();
+    const effectiveResolution =
+      (activeModel?.capabilities?.supportedResolutions?.length ?? 0) === 0
+        ? '1K'
+        : this.selectedResolution();
+    return getSupportedModelDurations(
+      activeModel,
+      this.selectedMode(),
+      effectiveResolution,
+      Boolean(this.image2Preview),
+    );
+  }
+
+  private syncSelectedDuration(suppressNotice = false, model?: any): void {
+    const supportedDurations = this.getSelectedModelDurations(model);
+    if (
+      supportedDurations.length === 0 ||
+      supportedDurations.includes(this.selectedDuration())
+    ) {
+      return;
+    }
+
+    const fallbackDuration = supportedDurations.at(-1);
+    if (!fallbackDuration) {
+      return;
+    }
+
+    const previousDuration = this.selectedDuration();
+    this.selectedDuration.set(fallbackDuration);
+
+    if (this.durationTimeoutId) {
+      clearTimeout(this.durationTimeoutId);
+    }
+    this.durationTimeoutId = setTimeout(() => {
+      this.durationChanged.emit(fallbackDuration);
+    });
+
+    if (!suppressNotice && previousDuration > fallbackDuration) {
+      const reason =
+        this.selectedMode() === 'Frames to Video' && Boolean(this.image2Preview)
+          ? 'when using an end frame'
+          : `for ${this.selectedMode()} mode`;
+      this.snackBar.open(
+        `Duration adjusted to ${fallbackDuration}s ${reason}.`,
+        'Close',
+        {duration: 4000},
+      );
+    }
+  }
+
+  isVideoPreviewUrl(url?: string | null, defaultToVideo = false): boolean {
+    if (!url) return false;
+    if (url.startsWith('data:image/')) return false;
+    if (url.startsWith('data:video/')) return true;
+    const lowerUrl = url.toLowerCase();
+    if (lowerUrl.includes('presignedthumbnailurls')) return false;
+    const cleanPath = lowerUrl.split('?')[0].split('#')[0];
+    if (/\.(png|webp|jpg|jpeg|gif|avif|svg)$/.test(cleanPath)) return false;
+    if (/\.(mp4|mov|webm|mpeg|mpg|avi|mkv|m4v)$/.test(cleanPath)) return true;
+    return defaultToVideo;
+  }
+
+  private updateSupportedResolutions(model?: any, modeChanged = false) {
+    const supported = this.getSelectedModelResolutions(model);
+    this.supportedResolutions.set(supported);
+
+    const activeModel = model || this.getSelectedModelObject();
+
+    // Notify user if resolution was artificially restricted by the current mode
+    if (
+      activeModel &&
+      activeModel.capabilities?.supportedResolutions?.length > 1 &&
+      supported.length === 1
+    ) {
+      if (
+        model ||
+        modeChanged ||
+        !supported.includes(this.selectedResolution())
+      ) {
+        this.snackBar.open(
+          `For ${this.selectedMode()} mode, ${activeModel.viewValue} supports only ${supported[0]} resolution.`,
+          'Close',
+          {duration: 5000},
+        );
+      }
+    }
+
+    if (supported.length === 0 && this.selectedResolution() !== '1K') {
+      this.selectedResolution.set('1K');
+      if (this.resolutionTimeoutId) clearTimeout(this.resolutionTimeoutId);
+      this.resolutionTimeoutId = setTimeout(() =>
+        this.resolutionChanged.emit('1K'),
+      );
+    } else if (
+      supported.length > 0 &&
+      !supported.includes(this.selectedResolution())
+    ) {
+      const fallbackResolution = supported[0];
+      this.selectedResolution.set(fallbackResolution);
+      // Defer event emission to avoid ExpressionChangedAfterItHasBeenCheckedError in parent during change detection
+      if (this.resolutionTimeoutId) clearTimeout(this.resolutionTimeoutId);
+      this.resolutionTimeoutId = setTimeout(() =>
+        this.resolutionChanged.emit(fallbackResolution),
+      );
+    }
   }
 }

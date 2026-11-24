@@ -15,7 +15,7 @@
 from typing import Annotated
 
 from fastapi import Query
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PositiveInt, field_validator, model_validator
 
 from src.audios.audio_constants import LanguageEnum, VoiceEnum
 from src.common.base_dto import BaseDto, GenerationModelEnum
@@ -39,6 +39,19 @@ class CreateAudioDto(BaseDto):
 
     workspace_id: int = Field(
         description="The ID of the workspace for this generation.",
+    )
+
+    metadata_generation_model: GenerationModelEnum | str | None = Field(
+        default=GenerationModelEnum.GEMINI_3_5_FLASH,
+        description="The Gemini model to use for synchronous metadata generation.",
+    )
+    titles: list[str] | None = Field(
+        default=None,
+        description="Optional titles for the generated audio.",
+    )
+    descriptions: list[str] | None = Field(
+        default=None,
+        description="Optional descriptions for the generated audio.",
     )
 
     # --- Lyria Specific Fields ---
@@ -71,16 +84,29 @@ class CreateAudioDto(BaseDto):
         description="The specific voice ID. For Gemini, must be a valid GeminiVoiceEnum value.",
     )
 
+    file_name: str | None = Field(
+        default=None,
+        description="Optional name for the generated media.",
+    )
+    folder_id: PositiveInt | None = Field(
+        default=None,
+        description="Optional gallery folder (same workspace) to save the generated media into. Defaults to the root folder.",
+    )
+
     @field_validator("model")
+    @classmethod
     def validate_audio_model(
         cls, value: GenerationModelEnum
     ) -> GenerationModelEnum:
         allowed_audio_models = {
             GenerationModelEnum.LYRIA_002,
+            GenerationModelEnum.LYRIA_3_CLIP_PREVIEW,
+            GenerationModelEnum.LYRIA_3_PRO_PREVIEW,
             GenerationModelEnum.CHIRP_3,
             GenerationModelEnum.GEMINI_2_5_FLASH_TTS,
             GenerationModelEnum.GEMINI_2_5_FLASH_LITE_PREVIEW_TTS,
             GenerationModelEnum.GEMINI_2_5_PRO_TTS,
+            GenerationModelEnum.GEMINI_3_1_FLASH_TTS_PREVIEW,
         }
 
         if value not in allowed_audio_models:

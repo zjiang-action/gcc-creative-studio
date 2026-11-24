@@ -36,6 +36,7 @@ from src.audios.audio_controller import router as audio_router
 from src.brand_guidelines.brand_guideline_controller import (
     router as brand_guideline_router,
 )
+from src.config.config_service import config_service
 from src.galleries.gallery_controller import router as gallery_router
 from src.generation_options.generation_options_controller import (
     router as generation_options_router,
@@ -51,17 +52,23 @@ from src.source_assets.source_asset_controller import (
 from src.tags.tags_controller import router as tags_router
 from src.users.user_controller import router as user_router
 from src.videos.veo_controller import router as video_router
-from src.workbench.router import router as workbench_router
+from src.workbench.workbench_controller import router as workbench_router
 from src.workflows.workflow_controller import router as workflow_router
 from src.workflows_executor.workflows_executor_controller import (
     router as workflows_executor_router,
 )
 from src.workspaces.workspace_controller import router as workspace_router
+from src.agents.agent_controller import router as agent_router
+from src.folders.folder_controller import router as folder_router
+from src.projects.project_controller import router as project_router
 
 
 def configure_cors(app):
     """Configures CORS middleware based on the environment."""
-    environment = getenv("ENVIRONMENT")
+    raw_env = config_service.ENVIRONMENT
+    environment = (
+        raw_env.strip() if raw_env and raw_env.strip() else "development"
+    ).lower()
     allowed_origins = []
 
     if environment == "production":
@@ -116,7 +123,18 @@ async def lifespan(app: FastAPI):
 
     logger.info("Creating ThreadPoolExecutor...")
     # Create the pool and attach it to the app's state
-    app.state.executor = ThreadPoolExecutor(max_workers=4)
+    app.state.executor = ThreadPoolExecutor(max_workers=8)
+
+    # Register workflow session store + dispatcher hooks.
+    from src.auth.auth_guard import register_post_auth_hook
+    from src.workflows.queue.run_state_service import set_dispatch_hook
+    from src.workflows.queue.workflow_dispatcher import (
+        handle_post_auth_session,
+        run_default_dispatch,
+    )
+
+    register_post_auth_hook(handle_post_auth_session)
+    set_dispatch_hook(run_default_dispatch)
 
     yield
 
@@ -124,7 +142,13 @@ async def lifespan(app: FastAPI):
 
     logger.info("Closing ThreadPoolExecutor...")
     app.state.executor.shutdown(wait=True)
-    # Your shutdown logic here, e.g., closing database connections
+    logger.info("Closing Cloud SQL Python Connector...")
+    try:
+        from src.database import cleanup_connector
+
+        await cleanup_connector()
+    except Exception as e:
+        logger.error(f"Error during database connector cleanup: {e}")
 
 
 app = FastAPI(
@@ -181,3 +205,6 @@ app.include_router(brand_guideline_router)
 app.include_router(workflow_router)
 app.include_router(workflows_executor_router)
 app.include_router(workbench_router)
+app.include_router(agent_router)
+app.include_router(project_router)
+app.include_router(folder_router)

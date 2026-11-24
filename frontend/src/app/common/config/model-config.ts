@@ -22,19 +22,25 @@ export type GenerationMode =
   | 'Text to Video'
   | 'Frames to Video'
   | 'Ingredients to Video'
+  | 'Extend Video'
   | 'Text to Audio'
   | 'Multimodal to text';
 
 export interface ModelCapability {
   supportedModes: GenerationMode[];
   maxReferenceImages: number; // Max images for ingredients/frames modes
+  maxReferenceVideos?: number; // Max videos for ingredients mode
+  maxConstrainedDuration?: number; // Max duration (s) when constrained by refs, extend, or end frame
   supportedAspectRatios: string[]; // e.g., ['16:9', '1:1']
+  supportedResolutions: ('1K' | '2K' | '4K')[]; // e.g., ['1K', '2K', '4K']
+  supportedDurations: number[];
   supportsAudio?: boolean; // For video
   supportsNegativePrompt?: boolean;
   supportsGoogleSearch?: boolean;
   supportsVoice?: boolean;
   supportsLanguage?: boolean;
   supportsSeed?: boolean;
+  supportsVideoReference?: boolean;
 }
 
 export interface GenerationModelConfig {
@@ -51,8 +57,8 @@ export interface GenerationModelConfig {
 export const MODEL_CONFIGS: GenerationModelConfig[] = [
   // --- Image Models ---
   {
-    value: 'gemini-3.1-flash-image-preview',
-    viewValue: 'Nano Banana 2 (Preview)',
+    value: 'gemini-3.1-flash-image',
+    viewValue: 'Nano Banana 2',
     type: 'IMAGE',
     imageSrc: 'assets/images/banana-peel.png',
     isImage: true,
@@ -60,6 +66,7 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
       supportedModes: ['Text to Image', 'Ingredients to Image'],
       maxReferenceImages: 14,
       supportedAspectRatios: [
+        'auto',
         '1:1',
         '16:9',
         '9:16',
@@ -75,12 +82,15 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
         '1:8',
         '8:1',
       ], // All
+      supportedResolutions: ['1K', '2K', '4K'],
+      supportedDurations: [],
       supportsGoogleSearch: true,
+      supportsVideoReference: true,
     },
   },
   {
-    value: 'gemini-3-pro-image-preview',
-    viewValue: 'Nano Banana Pro (Preview)',
+    value: 'gemini-3.1-flash-lite-image',
+    viewValue: 'Nano Banana 2 Lite',
     type: 'IMAGE',
     imageSrc: 'assets/images/banana-peel.png',
     isImage: true,
@@ -88,6 +98,39 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
       supportedModes: ['Text to Image', 'Ingredients to Image'],
       maxReferenceImages: 14,
       supportedAspectRatios: [
+        'auto',
+        '1:1',
+        '16:9',
+        '9:16',
+        '3:4',
+        '4:3',
+        '2:3',
+        '3:2',
+        '4:5',
+        '5:4',
+        '21:9',
+        '1:4',
+        '4:1',
+        '1:8',
+        '8:1',
+      ], // All
+      supportedResolutions: ['1K'],
+      supportedDurations: [],
+      supportsGoogleSearch: true,
+      supportsVideoReference: true,
+    },
+  },
+  {
+    value: 'gemini-3-pro-image',
+    viewValue: 'Nano Banana Pro',
+    type: 'IMAGE',
+    imageSrc: 'assets/images/banana-peel.png',
+    isImage: true,
+    capabilities: {
+      supportedModes: ['Text to Image', 'Ingredients to Image'],
+      maxReferenceImages: 14,
+      supportedAspectRatios: [
+        'auto',
         '1:1',
         '16:9',
         '9:16',
@@ -99,7 +142,10 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
         '5:4',
         '21:9',
       ], // All
+      supportedResolutions: ['1K', '2K', '4K'],
+      supportedDurations: [],
       supportsGoogleSearch: true,
+      supportsVideoReference: true,
     },
   },
   {
@@ -112,6 +158,7 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
       supportedModes: ['Text to Image', 'Ingredients to Image'],
       maxReferenceImages: 2,
       supportedAspectRatios: [
+        'auto',
         '1:1',
         '16:9',
         '9:16',
@@ -123,103 +170,13 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
         '5:4',
         '21:9',
       ],
+      supportedResolutions: ['1K', '2K', '4K'],
+      supportedDurations: [],
+      supportsVideoReference: true,
     },
   },
-  {
-    value: 'imagen-4.0-generate-001',
-    viewValue: 'Imagen 4 (deprecated)',
-    type: 'IMAGE',
-    icon: 'gemini-spark-icon',
-    isSvg: true,
-    capabilities: {
-      supportedModes: ['Text to Image'], // No ingredients support yet?
-      maxReferenceImages: 0,
-      supportedAspectRatios: ['1:1', '16:9', '9:16', '3:4', '4:3'],
-    },
-  },
-  {
-    value: 'imagen-4.0-ultra-generate-001',
-    viewValue: 'Imagen 4 Ultra (deprecated)',
-    type: 'IMAGE',
-    icon: 'gemini-spark-icon',
-    isSvg: true,
-    capabilities: {
-      supportedModes: ['Text to Image'],
-      maxReferenceImages: 0,
-      supportedAspectRatios: ['1:1', '16:9', '9:16', '3:4', '4:3'],
-    },
-  },
-  {
-    value: 'imagen-4.0-fast-generate-001',
-    viewValue: 'Imagen 4 Fast (deprecated)',
-    type: 'IMAGE',
-    icon: 'gemini-spark-icon',
-    isSvg: true,
-    capabilities: {
-      supportedModes: ['Text to Image'],
-      maxReferenceImages: 0,
-      supportedAspectRatios: ['1:1', '16:9', '9:16', '3:4', '4:3'],
-    },
-  },
-  {
-    value: 'imagen-3.0-generate-002',
-    viewValue: 'Imagen 3 (deprecated)',
-    type: 'IMAGE',
-    icon: 'auto_awesome',
-    capabilities: {
-      supportedModes: ['Text to Image', 'Ingredients to Image'],
-      maxReferenceImages: 2,
-      supportedAspectRatios: ['1:1', '16:9', '9:16', '3:4', '4:3'],
-    },
-  },
-  {
-    value: 'imagen-3.0-fast-generate-001',
-    viewValue: 'Imagen 3 Fast (deprecated)',
-    type: 'IMAGE',
-    icon: 'auto_awesome',
-    capabilities: {
-      supportedModes: ['Text to Image', 'Ingredients to Image'],
-      maxReferenceImages: 2,
-      supportedAspectRatios: ['1:1', '16:9', '9:16', '3:4', '4:3'],
-    },
-  },
+
   // --- Text Models ---
-  {
-    value: 'gemini-2.5-pro',
-    viewValue: 'Gemini 2.5 Pro',
-    type: 'TEXT',
-    icon: 'gemini-spark-icon',
-    isSvg: true,
-    capabilities: {
-      supportedModes: ['Multimodal to text'],
-      maxReferenceImages: 10,
-      supportedAspectRatios: [],
-    },
-  },
-  {
-    value: 'gemini-2.5-flash',
-    viewValue: 'Gemini 2.5 Flash',
-    type: 'TEXT',
-    icon: 'gemini-spark-icon',
-    isSvg: true,
-    capabilities: {
-      supportedModes: ['Multimodal to text'],
-      maxReferenceImages: 10,
-      supportedAspectRatios: [],
-    },
-  },
-  {
-    value: 'gemini-3-pro-preview',
-    viewValue: 'Gemini 3 Pro Preview',
-    type: 'TEXT',
-    icon: 'gemini-spark-icon',
-    isSvg: true,
-    capabilities: {
-      supportedModes: ['Multimodal to text'],
-      maxReferenceImages: 10,
-      supportedAspectRatios: [],
-    },
-  },
   {
     value: 'gemini-3-flash-preview',
     viewValue: 'Gemini 3 Flash Preview',
@@ -230,12 +187,183 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
       supportedModes: ['Multimodal to text'],
       maxReferenceImages: 10,
       supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-3.8-flash',
+    viewValue: 'Gemini 3.8 Flash',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-3.7-flash',
+    viewValue: 'Gemini 3.7 Flash',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-3.6-flash',
+    viewValue: 'Gemini 3.6 Flash',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-3.5-flash',
+    viewValue: 'Gemini 3.5 Flash',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-3.5-flash-lite',
+    viewValue: 'Gemini 3.5 Flash-Lite',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-3.1-pro-preview',
+    viewValue: 'Gemini 3.1 Pro Preview',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-3.1-flash-lite',
+    viewValue: 'Gemini 3.1 Flash-Lite',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-4-argon',
+    viewValue: 'Gemini 4 Argon',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+    },
+  },
+  {
+    value: 'gemini-4-hydrogen',
+    viewValue: 'Gemini 4 Hydrogen',
+    type: 'TEXT',
+    icon: 'gemini-spark-icon',
+    isSvg: true,
+    capabilities: {
+      supportedModes: ['Multimodal to text'],
+      maxReferenceImages: 10,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
     },
   },
   // --- Video Models ---
   {
+    value: 'gemini-omni-1.2-flash',
+    viewValue: 'Gemini Omni 1.2 Flash',
+    type: 'VIDEO',
+    icon: 'layers',
+    capabilities: {
+      supportedModes: [
+        'Text to Video',
+        'Ingredients to Video',
+        'Frames to Video',
+        'Extend Video',
+      ],
+      maxReferenceImages: 10,
+      maxReferenceVideos: 3,
+      maxConstrainedDuration: 10,
+      supportedAspectRatios: ['16:9', '9:16'],
+      supportedResolutions: [],
+      supportedDurations: [4, 6, 8, 10, 12, 15],
+      supportsAudio: true,
+      supportsVideoReference: true,
+    },
+  },
+  {
+    value: 'gemini-omni-1.1-flash-preview',
+    viewValue: 'Gemini Omni 1.1 Flash',
+    type: 'VIDEO',
+    icon: 'layers',
+    capabilities: {
+      supportedModes: [
+        'Text to Video',
+        'Ingredients to Video',
+        'Frames to Video',
+        'Extend Video',
+      ],
+      maxReferenceImages: 5,
+      maxReferenceVideos: 3,
+      supportedAspectRatios: ['16:9', '9:16'],
+      supportedResolutions: [],
+      supportedDurations: [4, 6, 8, 10],
+      supportsAudio: true,
+      supportsVideoReference: true,
+    },
+  },
+  {
     value: 'veo-3.1-generate-001',
-    viewValue: 'Veo 3.1 \n (Beta Audio)',
+    viewValue: 'Veo 3.1',
     type: 'VIDEO',
     icon: 'volume_up',
     capabilities: {
@@ -243,15 +371,19 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
         'Text to Video',
         'Ingredients to Video',
         'Frames to Video',
+        'Extend Video',
       ], // Assuming ingredients = image-to-video
       maxReferenceImages: 3,
+      maxReferenceVideos: 0,
       supportedAspectRatios: ['16:9', '9:16'],
+      supportedResolutions: ['1K', '2K', '4K'],
+      supportedDurations: [4, 6, 8],
       supportsAudio: true,
     },
   },
   {
     value: 'veo-3.1-lite-generate-001',
-    viewValue: 'Veo 3.1 Lite (Preview) \n (Beta Audio)',
+    viewValue: 'Veo 3.1 Lite',
     type: 'VIDEO',
     icon: 'volume_up',
     capabilities: {
@@ -259,15 +391,39 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
         'Text to Video',
         'Ingredients to Video',
         'Frames to Video',
+        'Extend Video',
       ],
       maxReferenceImages: 3,
+      maxReferenceVideos: 0,
       supportedAspectRatios: ['16:9', '9:16'],
+      supportedResolutions: ['1K', '2K'],
+      supportedDurations: [4, 6, 8],
+      supportsAudio: true,
+    },
+  },
+  {
+    value: 'veo-3.1-lite-generate-preview',
+    viewValue: 'Veo 3.1 Lite (Preview)',
+    type: 'VIDEO',
+    icon: 'volume_up',
+    capabilities: {
+      supportedModes: [
+        'Text to Video',
+        'Ingredients to Video',
+        'Frames to Video',
+        'Extend Video',
+      ],
+      maxReferenceImages: 3,
+      maxReferenceVideos: 0,
+      supportedAspectRatios: ['16:9', '9:16'],
+      supportedResolutions: ['1K', '2K'],
+      supportedDurations: [4, 6, 8],
       supportsAudio: true,
     },
   },
   {
     value: 'veo-3.1-fast-generate-001',
-    viewValue: 'Veo 3.1 Fast \n (Beta Audio)',
+    viewValue: 'Veo 3.1 Fast',
     type: 'VIDEO',
     icon: 'volume_up',
     capabilities: {
@@ -275,82 +431,29 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
         'Text to Video',
         'Ingredients to Video',
         'Frames to Video',
+        'Extend Video',
       ],
       maxReferenceImages: 3,
+      maxReferenceVideos: 0,
       supportedAspectRatios: ['16:9', '9:16'],
+      supportedResolutions: ['1K', '2K', '4K'],
+      supportedDurations: [4, 6, 8],
       supportsAudio: true,
     },
   },
-  {
-    value: 'veo-3.0-generate-001',
-    viewValue: 'Veo 3 Quality (deprecated) \n (Beta Audio)',
-    type: 'VIDEO',
-    icon: 'volume_up',
-    capabilities: {
-      supportedModes: ['Text to Video'],
-      maxReferenceImages: 3,
-      supportedAspectRatios: ['16:9', '9:16'],
-      supportsAudio: true,
-    },
-  },
-  {
-    value: 'veo-3.0-fast-generate-001',
-    viewValue: 'Veo 3 Fast (deprecated) \n (Beta Audio)',
-    type: 'VIDEO',
-    icon: 'volume_up',
-    capabilities: {
-      supportedModes: ['Text to Video'],
-      maxReferenceImages: 3,
-      supportedAspectRatios: ['16:9', '9:16'],
-      supportsAudio: true,
-    },
-  },
-  {
-    value: 'veo-2.0-generate-001',
-    viewValue: 'Veo 2 Quality (deprecated) \n (No Audio)',
-    type: 'VIDEO',
-    icon: 'videocam_off',
-    capabilities: {
-      supportedModes: ['Text to Video'],
-      maxReferenceImages: 3,
-      supportedAspectRatios: ['16:9', '9:16'],
-      supportsAudio: false,
-    },
-  },
-  {
-    value: 'veo-2.0-fast-generate-001',
-    viewValue: 'Veo 2 Fast (deprecated) \n (No Audio)',
-    type: 'VIDEO',
-    icon: 'videocam_off',
-    capabilities: {
-      supportedModes: ['Text to Video'],
-      maxReferenceImages: 3,
-      supportedAspectRatios: ['16:9', '9:16'],
-      supportsAudio: false,
-    },
-  },
-  {
-    value: 'veo-2.0-generate-exp',
-    viewValue: 'Veo 2 Exp (deprecated) \n (Reference Image)',
-    type: 'VIDEO',
-    icon: 'image',
-    capabilities: {
-      supportedModes: ['Text to Video', 'Ingredients to Video'],
-      maxReferenceImages: 3,
-      supportedAspectRatios: ['16:9', '9:16'],
-      supportsAudio: false,
-    },
-  },
+
   // --- Audio Models ---
   {
     value: 'lyria-002',
-    viewValue: 'Lyria',
+    viewValue: 'Lyria 2',
     type: 'AUDIO',
     icon: 'music_note',
     capabilities: {
       supportedModes: ['Text to Audio'],
       maxReferenceImages: 0,
       supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
       supportsSeed: true,
       supportsNegativePrompt: true,
       supportsVoice: false,
@@ -358,14 +461,67 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
     },
   },
   {
+    value: 'lyria-3-clip-preview',
+    viewValue: 'Lyria 3 Clip Preview',
+    type: 'AUDIO',
+    icon: 'music_note',
+    capabilities: {
+      supportedModes: ['Text to Audio'],
+      maxReferenceImages: 0,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+      supportsSeed: false,
+      supportsNegativePrompt: true,
+      supportsVoice: false,
+      supportsLanguage: false,
+    },
+  },
+  {
+    value: 'lyria-3-pro-preview',
+    viewValue: 'Lyria 3 Pro Preview',
+    type: 'AUDIO',
+    icon: 'music_note',
+    capabilities: {
+      supportedModes: ['Text to Audio'],
+      maxReferenceImages: 0,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+      supportsSeed: false,
+      supportsNegativePrompt: true,
+      supportsVoice: false,
+      supportsLanguage: false,
+    },
+  },
+  {
     value: 'gemini-2.5-flash-tts',
-    viewValue: 'Gemini TTS',
+    viewValue: 'Gemini 2.5 Flash TTS',
     type: 'AUDIO',
     icon: 'record_voice_over',
     capabilities: {
       supportedModes: ['Text to Audio'],
       maxReferenceImages: 0,
       supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
+      supportsVoice: true,
+      supportsLanguage: true,
+      supportsSeed: false,
+      supportsNegativePrompt: false,
+    },
+  },
+  {
+    value: 'gemini-3.1-flash-tts-preview',
+    viewValue: 'Gemini 3.1 Flash TTS Preview',
+    type: 'AUDIO',
+    icon: 'record_voice_over',
+    capabilities: {
+      supportedModes: ['Text to Audio'],
+      maxReferenceImages: 0,
+      supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
       supportsVoice: true,
       supportsLanguage: true,
       supportsSeed: false,
@@ -381,6 +537,8 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
       supportedModes: ['Text to Audio'],
       maxReferenceImages: 0,
       supportedAspectRatios: [],
+      supportedResolutions: [],
+      supportedDurations: [],
       supportsVoice: true,
       supportsLanguage: true,
       supportsSeed: false,
@@ -389,8 +547,12 @@ export const MODEL_CONFIGS: GenerationModelConfig[] = [
   },
 ];
 
+export const ASPECT_RATIO_AUTO = 'auto';
+export const ASPECT_RATIO_SQUARE = '1:1';
+
 export const ASPECT_RATIO_LABELS: Record<string, string> = {
-  '1:1': '1:1 (Square)',
+  [ASPECT_RATIO_AUTO]: 'Auto (Dynamic)',
+  [ASPECT_RATIO_SQUARE]: '1:1 (Square)',
   '16:9': '16:9 (Landscape)',
   '9:16': '9:16 (Portrait)',
   '4:3': '4:3 (Standard)',
@@ -405,3 +567,71 @@ export const ASPECT_RATIO_LABELS: Record<string, string> = {
   '1:8': '1:8 (Tall Ribbon)',
   '8:1': '8:1 (Wide Ribbon)',
 };
+
+/**
+ * Checks whether a given model identifier or display name corresponds to Gemini Omni.
+ */
+export function isGeminiOmniModel(modelValue?: string | null): boolean {
+  if (!modelValue) return false;
+  const config = MODEL_CONFIGS.find(
+    m => m.value === modelValue || m.viewValue === modelValue,
+  );
+  const val = (config?.value ?? modelValue).toLowerCase();
+  return (
+    val === 'gemini-omni-flash-preview' ||
+    val === 'gemini-omni-1.1-flash-preview' ||
+    val === 'gemini-omni-1.2-flash' ||
+    val === 'gemini-omni-generate-preview' ||
+    val === 'gemini-omni' ||
+    val.includes('gemini-omni') ||
+    val.includes('gemini omni')
+  );
+}
+
+/**
+ * Computes valid clip durations for a video model given the active mode,
+ * resolution, and whether an end frame is populated.
+ */
+export function getSupportedModelDurations(
+  model: GenerationModelConfig | undefined,
+  mode: string,
+  resolution: '1K' | '2K' | '4K' = '1K',
+  hasEndFrame = false,
+): number[] {
+  const baseDurations = model?.capabilities?.supportedDurations ?? [];
+  if (baseDurations.length === 0) {
+    return [];
+  }
+
+  const isOmni = isGeminiOmniModel(model?.value);
+  if ((!isOmni && mode !== 'Text to Video') || resolution !== '1K') {
+    const longest = baseDurations.at(-1);
+    return longest ? [longest] : [];
+  }
+
+  const constrainedMax = model?.capabilities?.maxConstrainedDuration;
+  if (
+    constrainedMax !== undefined &&
+    (mode === 'Ingredients to Video' ||
+      mode === 'Extend Video' ||
+      (mode === 'Frames to Video' && hasEndFrame))
+  ) {
+    return baseDurations.filter(d => d <= constrainedMax);
+  }
+
+  return [...baseDurations];
+}
+
+export const RETIRED_TEXT_MODEL_MAP: Record<string, string> = {
+  'gemini-2.5-pro': 'gemini-4-argon',
+  'gemini-2.5-flash': 'gemini-4-hydrogen',
+};
+
+export function normalizeTextModelId(
+  modelValue?: string | null,
+): string | null | undefined {
+  if (!modelValue) {
+    return modelValue;
+  }
+  return RETIRED_TEXT_MODEL_MAP[modelValue] ?? modelValue;
+}
